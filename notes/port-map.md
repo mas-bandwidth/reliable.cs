@@ -43,7 +43,7 @@ the wire is concerned; the API is what a careful C# expert would write.
 | `reliable_read_packet_header` | `Wire.ReadPacketHeader(ReadOnlySpan<byte>, out seq, out ack, out ackBits) → int` (−1 on reject) |
 | `reliable_read_fragment_header` | `Wire.ReadFragmentHeader(...) → int` (−1 on reject), same 6 rejection rules |
 | `reliable_fragment_reassembly_data_t` | internal struct in the reassembly sequence buffer; `packet_data` is a pooled `byte[]` (`ArrayPool<byte>.Shared`), returned on delivery / eviction / reset. |
-| `reliable_sent_packet_data_t` (bitfield: acked:1, packet_bytes:31) | internal struct `{ double Time; uint PacketBytesAndAcked; }` — packed the same way to keep the same 31-bit size arithmetic. |
+| `reliable_sent_packet_data_t` (bitfield: acked:1, packet_bytes:31) | internal struct `{ double Time; uint PacketBytes; bool Acked; }` — plain fields; the C's 31-bit packing has no wire relevance and its truncation point (2^31 bytes) is unreachable for any constructible config. |
 | `reliable_received_packet_data_t` | internal struct `{ double Time; uint PacketBytes; }` |
 
 ## Wire-relevant invariants (must be byte-exact / behavior-exact)
