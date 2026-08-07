@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          # 10.0.x is the current SDK (builds everything); 8.0.x supplies the LTS
+          # runtime so the net8.0 leg runs on the real .NET 8, not a roll-forward
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Build (both TFMs, warnings are errors)
+        run: dotnet build tests/Tests.csproj -c Release
+      - name: Tests (net10.0)
+        run: dotnet run -c Release --project tests/Tests.csproj -f net10.0 --no-build
+      - name: Tests (net8.0, the LTS leg)
+        run: dotnet run -c Release --project tests/Tests.csproj -f net8.0 --no-build
+      # no test framework, so the runner's exit code is the whole verdict; the
+      # compat harness is exercised for real in the c-interop job — this keeps
+      # it compiling on both OSes
+      - name: Build the compat harness
+        run: dotnet build compat/Compat.csproj -c Release
+
+  c-interop:
+    name: C wire + behavior compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out the C reliable library (pinned release)
+        uses: actions/checkout@v7
+        with:
+          # bump deliberately, in its own commit. the golden pins in
+          # tests/Tests.cs were generated at this same tag.
+          repository: mas-bandwidth/reliable
+          ref: v1.4.0
+          path: c-reliable
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      # CC=clang pins the compiler. -ffp-contract=off inside the script is
+      # MANDATORY: C# evaluates float expressions strictly, and a contracted C
+      # build drifts the smoothed stats by 1 ulp and fails the bit-exact
+      # comparison. The gate diffs every transmitted byte, every delivered
+      # packet, every ack, counter and stat across clean, lossy, and hostile
+      # scenario profiles including two 5000-iteration differential soaks.
+      - name: Interop gate (byte identity across vectors, scenarios, soaks)
+        run: CC=clang scripts/interop.sh c-reliable
+
+  spec-sync:
+    name: STANDARD.md matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # STANDARD.md here is a VERBATIM VENDORED COPY of the wire-format
+      # specification that lives in mas-bandwidth/reliable. This job fails if
+      # the two have diverged.
+      #
+      # Why vendor rather than link: an implementer wants the normative text
+      # beside the implementation, at the revision they are reading. Why check:
+      # a duplicated normative document is the same failure as a duplicated
+      # constant, except it drifts silently and the ports are what break.
+      #
+      # Diffed against upstream main, not the interop tag: drift detection is
+      # the point. If this fails, the upstream spec changed. Read the diff, port
+      # whatever it implies, then copy the new file across in the same commit.
+      - name: Compare against mas-bandwidth/reliable
+        run: |
+          curl -fsSL -o /tmp/upstream-STANDARD.md \
+            https://raw.githubusercontent.com/mas-bandwidth/reliable/main/STANDARD.md
+          if ! diff -u /tmp/upstream-STANDARD.md STANDARD.md; then
+            echo "::error::STANDARD.md has diverged from mas-bandwidth/reliable"
+            exit 1
+          fi
+          echo "STANDARD.md matches upstream"
