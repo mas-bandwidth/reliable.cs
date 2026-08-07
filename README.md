@@ -15,8 +15,8 @@ vectors are pinned from the real C library into the test suite, and the interop
 gate in `compat/` runs this code head-to-head against the real `reliable.c` —
 same scripted scenarios, same shared PRNG, every transmitted byte, every
 delivered packet, every ack, every counter and every stat compared bit for bit,
-through clean, lossy, and hostile (corrupting) link profiles including
-5000-iteration differential soaks.
+through clean, lossy, hostile (corrupting) and sequence-wrap link profiles
+including 5000-iteration differential soaks.
 
 Family values (shared with serialize.cs): zero third-party dependencies,
 including test frameworks; hostile wire data never throws — malformed, stale,

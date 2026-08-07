@@ -101,7 +101,8 @@ dotnet run -c Release --project compat/Compat.csproj -- scenario hostile <seed> 
 `-ffp-contract=off` on the C build is load-bearing for the bit-exact stats
 comparison; see README.
 
-The scenario profiles (`clean`, `lossy`, `hostile`) and their exact PRNG draw
+The scenario profiles (`clean`, `lossy`, `hostile`, `wrap` — the last crosses
+the 16-bit sequence wrap) and their exact PRNG draw
 order are specified in comments in `compat/c/compat.c` / `compat/Compat.cs`.
 New profiles, seeds, and iteration counts are yours to add — a divergence found
 with any seed is a finding.

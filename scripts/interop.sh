@@ -54,6 +54,7 @@ gate "wire vectors"                    vectors
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500
+gate "scenario wrap     (seed 6)"      scenario wrap 6 2000
 gate "differential soak (seed 4)"      scenario hostile 4 5000
 gate "differential soak (seed 5)"      scenario lossy 5 5000
 

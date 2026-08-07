@@ -199,6 +199,8 @@ internal static class Program
     private static int s_duplicatePct;
     private static bool s_inject;
     private static int s_processRejectPct;
+    private static int s_warpSends;
+    private static bool s_quiet;
 
     // draw order per flush: fisher-yates (one draw per swap, i from n-1 down to
     // 1), then per packet in post-shuffle order: loss draw; if lost, nothing
@@ -244,7 +246,8 @@ internal static class Program
 
     private static void ScenarioTransmit(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
     {
-        s_out.Write($"T {(id == 0 ? 'A' : 'B')} {sequence} {packetData.Length} {Fnv1a64(packetData):x16}\n");
+        if (!s_quiet)
+            s_out.Write($"T {(id == 0 ? 'A' : 'B')} {sequence} {packetData.Length} {Fnv1a64(packetData):x16}\n");
         if (id == 0)
             s_aToB.Queue(packetData);
         else
@@ -255,6 +258,8 @@ internal static class Program
 
     private static bool ScenarioProcess(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
     {
+        if (s_quiet)
+            return true;
         bool accept = true;
         if (s_processRejectPct > 0 && RngInt(0, 99) < s_processRejectPct)
             accept = false;
@@ -313,6 +318,14 @@ internal static class Program
                 s_duplicatePct = 5;
                 s_processRejectPct = 2;
                 break;
+            case "wrap":
+                // lossy link, but first both endpoints are quietly warped to
+                // sequence ~64900 so the traced phase crosses the 16 bit wrap
+                s_lossPct = 10;
+                s_duplicatePct = 5;
+                s_processRejectPct = 2;
+                s_warpSends = 64900;
+                break;
             case "hostile":
                 s_lossPct = 10;
                 s_corruptPct = 20;
@@ -356,6 +369,29 @@ internal static class Program
         s_out.Write($"SCENARIO {profile} {seed} {iterations}\n");
 
         byte[] payload = new byte[ScenarioMaxPacketBytes];
+
+        // warp phase: tiny packets, delivered verbatim in queue order, nothing
+        // traced, no PRNG draws, no update. identical in compat.c; the traced
+        // phase then starts near the sequence wrap.
+        if (s_warpSends > 0)
+        {
+            s_quiet = true;
+            byte[] tiny = new byte[1];
+            for (int i = 0; i < s_warpSends; i++)
+            {
+                s_a.SendPacket(tiny);
+                s_b.SendPacket(tiny);
+                for (int j = 0; j < s_aToB.NumPackets; j++)
+                    s_b.ReceivePacket(s_aToB.Data[j].AsSpan(0, s_aToB.Bytes[j]));
+                for (int j = 0; j < s_bToA.NumPackets; j++)
+                    s_a.ReceivePacket(s_bToA.Data[j].AsSpan(0, s_bToA.Bytes[j]));
+                s_aToB.Clear();
+                s_bToA.Clear();
+                s_a.ClearAcks();
+                s_b.ClearAcks();
+            }
+            s_quiet = false;
+        }
 
         for (int iteration = 0; iteration < iterations; iteration++)
         {
@@ -443,7 +479,7 @@ internal static class Program
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat scenario <clean|lossy|hostile> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 

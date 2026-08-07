@@ -15,7 +15,9 @@
       scenario <profile> <seed> <n>    two endpoints exchange traffic for n
                                        iterations across a scripted link driven by
                                        a shared deterministic PRNG (xorshift64*).
-                                       profiles: clean | lossy | hostile.
+                                       profiles: clean | lossy |
+                                       hostile | wrap (crosses the 16 bit
+                                       sequence wrap).
                                        the trace records every transmit, every
                                        processed packet (FNV-1a 64 of the bytes),
                                        per-iteration acks, and periodic + final
@@ -210,11 +212,13 @@ struct scenario_t
     int duplicate_pct;
     int inject;
     int process_reject_pct;
+    int warp_sends;
 };
 
 static struct scenario_t scenario;
 
 static int hex_dump_payloads = 0;
+static int quiet = 0;
 
 static void link_queue( struct link_t * link, const uint8_t * data, int bytes )
 {
@@ -281,7 +285,8 @@ static void link_flush( struct link_t * link, struct reliable_endpoint_t * to )
 static void scenario_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
 {
     (void) context;
-    printf( "T %c %u %d %016" PRIx64 "\n", id == 0 ? 'A' : 'B', sequence, packet_bytes, fnv1a64( packet_data, packet_bytes ) );
+    if ( !quiet )
+        printf( "T %c %u %d %016" PRIx64 "\n", id == 0 ? 'A' : 'B', sequence, packet_bytes, fnv1a64( packet_data, packet_bytes ) );
     if ( id == 0 )
         link_queue( &scenario.a_to_b, packet_data, packet_bytes );
     else
@@ -291,6 +296,8 @@ static void scenario_transmit( void * context, uint64_t id, uint16_t sequence, u
 static int scenario_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
 {
     (void) context;
+    if ( quiet )
+        return 1;
     int accept = 1;
     if ( scenario.process_reject_pct > 0 && rng_int( 0, 99 ) < scenario.process_reject_pct )
         accept = 0;
@@ -350,6 +357,15 @@ static void run_scenario( const char * profile, uint64_t seed, int iterations )
         scenario.duplicate_pct = 5;
         scenario.process_reject_pct = 2;
     }
+    else if ( strcmp( profile, "wrap" ) == 0 )
+    {
+        /* lossy link, but first both endpoints are quietly warped to sequence
+           ~64900 so the traced phase crosses the 16 bit wrap */
+        scenario.loss_pct = 10;
+        scenario.duplicate_pct = 5;
+        scenario.process_reject_pct = 2;
+        scenario.warp_sends = 64900;
+    }
     else if ( strcmp( profile, "hostile" ) == 0 )
     {
         scenario.loss_pct = 10;
@@ -388,6 +404,29 @@ static void run_scenario( const char * profile, uint64_t seed, int iterations )
     printf( "SCENARIO %s %" PRIu64 " %d\n", profile, seed, iterations );
 
     uint8_t payload[SCENARIO_MAX_PACKET_BYTES];
+
+    /* warp phase: tiny packets, delivered verbatim in queue order, nothing
+       traced, no PRNG draws, no update. both halves implement this
+       identically; the traced phase then starts near the sequence wrap. */
+    if ( scenario.warp_sends > 0 )
+    {
+        quiet = 1;
+        uint8_t tiny[1] = { 0 };
+        for ( int i = 0; i < scenario.warp_sends; i++ )
+        {
+            reliable_endpoint_send_packet( scenario.a, tiny, 1 );
+            reliable_endpoint_send_packet( scenario.b, tiny, 1 );
+            for ( int j = 0; j < scenario.a_to_b.num_packets; j++ )
+                reliable_endpoint_receive_packet( scenario.b, scenario.a_to_b.packets[j].data, scenario.a_to_b.packets[j].bytes );
+            for ( int j = 0; j < scenario.b_to_a.num_packets; j++ )
+                reliable_endpoint_receive_packet( scenario.a, scenario.b_to_a.packets[j].data, scenario.b_to_a.packets[j].bytes );
+            link_clear( &scenario.a_to_b );
+            link_clear( &scenario.b_to_a );
+            reliable_endpoint_clear_acks( scenario.a );
+            reliable_endpoint_clear_acks( scenario.b );
+        }
+        quiet = 0;
+    }
 
     for ( int iteration = 0; iteration < iterations; iteration++ )
     {
@@ -489,7 +528,7 @@ int main( int argc, char ** argv )
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat scenario <clean|lossy|hostile> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 
