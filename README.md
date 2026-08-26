@@ -137,5 +137,5 @@ C# programmer would expect. The differences, all recorded in
 
 ## License
 
-This library is licensed AGPL-3.0 (see [LICENSE](LICENSE)).
+AGPL-3.0 for now (see [LICENSE](LICENSE)); intended to move to MBSL when ready.
 The reference C implementation is BSD-3-Clause.
