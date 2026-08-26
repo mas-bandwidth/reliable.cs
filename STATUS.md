@@ -58,4 +58,4 @@ Where the port stands, exactly. Written for a cold reader.
   hostile coverage here is the seeded harnesses + differential soaks.
 - CI status of the final two commits (notes + wrap profile) unverified at
   session end — check Actions before trusting main.
-- Licensing: AGPL-3.0 now, per Glenn; move to MBSL when ready (README notes it).
+- Licensing: AGPL-3.0 (README notes it).
