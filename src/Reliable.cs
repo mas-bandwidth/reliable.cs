@@ -26,9 +26,9 @@
     per thread, or protect each endpoint with your own lock. The log level and
     writer are process-wide.
 
-    Copyright © 2026 Más Bandwidth LLC. Licensed under AGPL-3.0 (see LICENSE).
-    The reference C implementation is BSD-3-Clause,
-    © 2017-2026 Más Bandwidth LLC.
+    Copyright © 2026 Más Bandwidth LLC. Licensed under AGPL-3.0 (see LICENSE);
+    intended to move to MBSL when ready. The reference C implementation is
+    BSD-3-Clause, © 2017-2026 Más Bandwidth LLC.
 */
 
 using System;
