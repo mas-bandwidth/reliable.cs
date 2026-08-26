@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/mas-bandwidth/reliable.cs/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/reliable.cs/actions/workflows/ci.yml)
 
+If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+
 **Status: released** — v1.0.0, the first release. Wire and behavior compatibility with the C reference is proven in CI on every push (the "C wire + behavior compatibility" gate).
 
 C# port of the [reliable](https://github.com/mas-bandwidth/reliable) C library:
