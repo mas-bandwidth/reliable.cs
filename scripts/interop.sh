@@ -19,6 +19,8 @@ cd "$(dirname "$0")/.."
 
 CC="${CC:-cc}"
 C_RELIABLE="${1:-../reliable}"
+FP_CONTRACT="${FP_CONTRACT:--ffp-contract=off}"
+[ -n "$FP_CONTRACT" ] || { echo "error: FP_CONTRACT must name a strict-float flag (default -ffp-contract=off)" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -28,7 +30,8 @@ trap 'rm -rf "$WORK"' EXIT
 # drift by 1 ulp and fail the bit-exact stats comparison. Strict IEEE evaluation
 # is the normative behavior (same rule as the serialize.cs interop gate).
 echo "== building C compat harness against $C_RELIABLE"
-"$CC" -O2 -ffp-contract=off -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$C_RELIABLE/reliable.c" -lm
+echo "== C compiler: $CC ($(command -v "$CC")) $("$CC" --version | head -1) $FP_CONTRACT"
+"$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$C_RELIABLE/reliable.c" -lm
 
 echo "== building C# compat harness"
 dotnet build -c Release compat/Compat.csproj --nologo -v q

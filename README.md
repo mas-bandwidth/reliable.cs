@@ -72,7 +72,10 @@ of difference fails. Two requirements the script enforces and CI pins:
   evaluates float expressions strictly, and default clang/gcc on ARM64 contract
   the stats smoothing (`a + b*c`) into fused multiply-adds that drift by 1 ulp
   and fail the bit-exact stats comparison. (The same rule as the serialize.cs
-  interop gate.)
+  interop gate.) The gate runs on both x86-64 (`ubuntu-latest`) and arm64
+  (`macos-latest`, where clang's default `-ffp-contract=on` would fuse
+  `a + b*c`), and `FloatMultiplyAddRoundsTwice` in `tests/Tests.cs` pins the C#
+  side's strict rounding the way `-ffp-contract=off` pins the C side's.
 - CI pins the C clone to a release tag (`v1.4.0`); bump deliberately, in its
   own commit.
 

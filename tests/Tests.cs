@@ -91,6 +91,10 @@ internal static partial class Tests
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
 
+        // C#-specific: strict IEEE float evaluation, the canary for the C
+        // build's -ffp-contract=off (the same rule the interop gate pins)
+        RunTest("test_float_multiply_add_rounds_twice", FloatMultiplyAddRoundsTwice);
+
         // C#-specific: seeded adversarial soak (the fuzz.c link model)
         RunTest("test_soak", TestSoak);
 
@@ -1110,5 +1114,40 @@ internal static partial class Tests
         }
 
         Check(firstFragmentChecked, "golden fragments: first fragment pin exercised");
+    }
+
+    // ------------------------------------------------------------
+    // test_float_multiply_add_rounds_twice
+    //
+    // The C# half of the contraction rule the C build's -ffp-contract=off pins:
+    // a*b + c must round twice (once for the product, once for the add), never
+    // fuse into a single-rounded FMA. The pairs below are chosen so a fused
+    // evaluation leaves a nonzero residue where strict evaluation cancels to
+    // zero, so a JIT that contracts (or a constant-folded input) turns this red.
+    // The inputs live in static fields, not locals, so the JIT cannot prove
+    // them constant and fold the whole expression at compile time.
+
+    private static float s_fmaFloatA = BitConverter.Int32BitsToSingle(0x3F800800);
+    private static float s_fmaFloatC = BitConverter.Int32BitsToSingle(unchecked((int)0xBF801000));
+    private static double s_fmaDoubleA = BitConverter.Int64BitsToDouble(0x3FF0000002000000);
+    private static double s_fmaDoubleC = BitConverter.Int64BitsToDouble(unchecked((long)0xBFF0000004000000));
+
+    private static void FloatMultiplyAddRoundsTwice()
+    {
+        float a = s_fmaFloatA;
+        float b = s_fmaFloatA;
+        float c = s_fmaFloatC;
+
+        uint productPlusAdd = BitConverter.SingleToUInt32Bits(a * b + c);
+        Check(productPlusAdd == 0x00000000u,
+            $"float a*b+c must round twice, got 0x{productPlusAdd:x8} (fused/FMA gives 0x33800000)");
+
+        double da = s_fmaDoubleA;
+        double db = s_fmaDoubleA;
+        double dc = s_fmaDoubleC;
+
+        ulong doubleProductPlusAdd = BitConverter.DoubleToUInt64Bits(da * db + dc);
+        Check(doubleProductPlusAdd == 0x0000000000000000ul,
+            $"double a*b+c must round twice, got 0x{doubleProductPlusAdd:x16} (fused/FMA gives 0x3c90000000000000)");
     }
 }
