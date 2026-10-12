@@ -19,7 +19,8 @@ cd "$(dirname "$0")/.."
 
 CC="${CC:-cc}"
 C_RELIABLE="${1:-../reliable}"
-FP_CONTRACT="-ffp-contract=off"
+FP_CONTRACT="${FP_CONTRACT:--ffp-contract=off}"
+[ -n "$FP_CONTRACT" ] || { echo "error: FP_CONTRACT must name a strict-float flag (default -ffp-contract=off)" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
