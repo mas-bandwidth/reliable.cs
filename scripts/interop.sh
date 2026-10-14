@@ -21,6 +21,17 @@ CC="${CC:-cc}"
 C_RELIABLE="${1:-../reliable}"
 FP_CONTRACT="${FP_CONTRACT:--ffp-contract=off}"
 [ -n "$FP_CONTRACT" ] || { echo "error: FP_CONTRACT must name a strict-float flag (default -ffp-contract=off)" >&2; exit 1; }
+
+# Hermetic when no C reference is reachable: the differential leg needs a real
+# checkout of mas-bandwidth/reliable, named by the argument (or the ../reliable
+# default). Without one, skip loudly and succeed so local/unit runs are not
+# blocked; CI always passes the pinned checkout.
+if [ ! -f "$C_RELIABLE/reliable.c" ]; then
+    echo "SKIP: no C reference checkout at $C_RELIABLE" >&2
+    echo "SKIP: pass one explicitly: scripts/interop.sh <path-to-reliable>" >&2
+    exit 0
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -54,6 +65,7 @@ gate() {
 }
 
 gate "wire vectors"                    vectors
+gate "malformed inputs"                malformed
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500
