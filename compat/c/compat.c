@@ -184,6 +184,110 @@ static void run_vectors( void )
 }
 
 /* ---------------------------------------------------------------- */
+/* malformed mode                                                   */
+
+/* one hostile / boundary input per checklist item 5: zero length, oversize,
+   truncated headers, bad fragment counts. each vector is fed to a fresh
+   endpoint; the line reports what the endpoint did and the eleven counters.
+   the C# twin is Reliable.Compat.Program.RunMalformed. identical text. */
+
+#define MALFORMED_MAX_PACKET 100
+
+static const char * counter_names[11] =
+{
+    "sent", "received", "acked", "stale", "invalid",
+    "too_large_send", "too_large_receive", "fragments_sent",
+    "fragments_received", "fragments_invalid", "duplicate",
+};
+
+static uint16_t malformed_delivered_sequence;
+static int malformed_delivered_length;
+static int malformed_delivered;
+
+static int malformed_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) packet_data;
+    malformed_delivered = 1;
+    malformed_delivered_sequence = sequence;
+    malformed_delivered_length = packet_bytes;
+    return 1;
+}
+
+static void malformed_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static void run_malformed( void )
+{
+    struct reliable_config_t config;
+    reliable_default_config( &config );
+    reliable_copy_string( config.name, "malformed", sizeof( config.name ) );
+    config.max_packet_size = MALFORMED_MAX_PACKET;
+    config.fragment_above = 50;
+    config.fragment_size = 50;
+    config.max_fragments = 16;
+    config.transmit_packet_function = malformed_transmit;
+    config.process_packet_function = malformed_process;
+
+    uint8_t oversize[MALFORMED_MAX_PACKET + 16];
+    memset( oversize, 0, sizeof( oversize ) );
+
+    static const struct { const uint8_t * data; int bytes; const char * label; } vectors[] =
+    {
+        { (const uint8_t *) "",              0,  "zero-length" },
+        { oversize,                          sizeof( oversize ), "oversize" },
+        { (const uint8_t *) "\x00",           1,  "prefix-only" },
+        { (const uint8_t *) "\x00\x01",       2,  "seq-truncated" },
+        { (const uint8_t *) "\x20\x01\x02",   3,  "ack-diff-missing" },
+        { (const uint8_t *) "\x01\x00\x01",   3,  "fragment-short" },
+        { (const uint8_t *) "\x01\x00\x00\x05\x02", 5, "fragment-id-range" },
+        { (const uint8_t *) "\x01\x00\x00\x00\xFF", 5, "fragment-too-many" },
+        { (const uint8_t *) "\x01\x00\x00\x00\x00", 5, "fragment-no-header" },
+        { (const uint8_t *) "\x00\x00\x00\x00\x00", 5, "valid-minimal" },
+    };
+
+    int num_vectors = (int) ( sizeof( vectors ) / sizeof( vectors[0] ) );
+
+    for ( int n = 0; n < num_vectors; n++ )
+    {
+        struct reliable_endpoint_t * endpoint = reliable_endpoint_create( &config, 100.0 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+
+        uint64_t before[RELIABLE_ENDPOINT_NUM_COUNTERS];
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+            before[i] = counters[i];
+
+        malformed_delivered = 0;
+        malformed_delivered_sequence = 0;
+        malformed_delivered_length = 0;
+
+        reliable_endpoint_receive_packet( endpoint, (uint8_t *) vectors[n].data, vectors[n].bytes );
+
+        const char * changed = "none";
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        {
+            if ( counters[i] != before[i] )
+            {
+                changed = counter_names[i];
+                break;
+            }
+        }
+
+        printf( "%d %s %s ", n, malformed_delivered ? "accepted" : "refused", changed );
+        if ( malformed_delivered )
+            printf( "%u %d", malformed_delivered_sequence, malformed_delivered_length );
+        else
+            printf( "-" );
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+            printf( " %" PRIu64, counters[i] );
+        printf( "\n" );
+
+        reliable_endpoint_destroy( endpoint );
+    }
+}
+
+/* ---------------------------------------------------------------- */
 /* scenario mode                                                    */
 
 #define MAX_QUEUE 8192
@@ -522,13 +626,17 @@ int main( int argc, char ** argv )
     {
         run_vectors();
     }
+    else if ( argc >= 2 && strcmp( argv[1], "malformed" ) == 0 )
+    {
+        run_malformed();
+    }
     else if ( argc >= 5 && strcmp( argv[1], "scenario" ) == 0 )
     {
         run_scenario( argv[2], strtoull( argv[3], NULL, 10 ), atoi( argv[4] ) );
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat malformed | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 

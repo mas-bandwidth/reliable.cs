@@ -162,6 +162,109 @@ internal static class Program
     }
 
     // ------------------------------------------------------------
+    // malformed mode
+
+    // one hostile / boundary input per checklist item 5: zero length, oversize,
+    // truncated headers, bad fragment counts. each vector is fed to a fresh
+    // endpoint; the line reports what the endpoint did and the eleven counters.
+    // the C twin is run_malformed in c/compat.c. identical text.
+
+    private const int MalformedMaxPacket = 100;
+
+    private static readonly string[] CounterNames =
+    {
+        "sent", "received", "acked", "stale", "invalid",
+        "too_large_send", "too_large_receive", "fragments_sent",
+        "fragments_received", "fragments_invalid", "duplicate",
+    };
+
+    private static ushort s_malformedDeliveredSequence;
+    private static int s_malformedDeliveredLength;
+    private static bool s_malformedDelivered;
+
+    private static bool MalformedProcess(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
+    {
+        s_malformedDelivered = true;
+        s_malformedDeliveredSequence = sequence;
+        s_malformedDeliveredLength = packetData.Length;
+        return true;
+    }
+
+    private static void RunMalformed()
+    {
+        EndpointConfig config = new EndpointConfig
+        {
+            Name = "malformed",
+            MaxPacketSize = MalformedMaxPacket,
+            FragmentAbove = 50,
+            FragmentSize = 50,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = MalformedProcess,
+        };
+
+        byte[] oversize = new byte[MalformedMaxPacket + 16];
+
+        (byte[] Data, string Label)[] vectors =
+        {
+            (Array.Empty<byte>(), "zero-length"),
+            (oversize, "oversize"),
+            (new byte[] { 0x00 }, "prefix-only"),
+            (new byte[] { 0x00, 0x01 }, "seq-truncated"),
+            (new byte[] { 0x20, 0x01, 0x02 }, "ack-diff-missing"),
+            (new byte[] { 0x01, 0x00, 0x01 }, "fragment-short"),
+            (new byte[] { 0x01, 0x00, 0x00, 0x05, 0x02 }, "fragment-id-range"),
+            (new byte[] { 0x01, 0x00, 0x00, 0x00, 0xFF }, "fragment-too-many"),
+            (new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00 }, "fragment-no-header"),
+            (new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00 }, "valid-minimal"),
+        };
+
+        for (int n = 0; n < vectors.Length; n++)
+        {
+            Endpoint endpoint = new Endpoint(config, 100.0);
+            ReadOnlySpan<ulong> counters = endpoint.Counters;
+
+            ulong[] before = new ulong[Endpoint.NumCounters];
+            for (int i = 0; i < Endpoint.NumCounters; i++)
+                before[i] = counters[i];
+
+            s_malformedDelivered = false;
+            s_malformedDeliveredSequence = 0;
+            s_malformedDeliveredLength = 0;
+
+            try
+            {
+                endpoint.ReceivePacket(vectors[n].Data);
+            }
+            catch (ArgumentException)
+            {
+                // the port refuses an empty datagram; C counts it (finding, item 5)
+            }
+
+            string changed = "none";
+            for (int i = 0; i < Endpoint.NumCounters; i++)
+            {
+                if (counters[i] != before[i])
+                {
+                    changed = CounterNames[i];
+                    break;
+                }
+            }
+
+            StringBuilder sb = new StringBuilder(128);
+            sb.Append(n).Append(' ').Append(s_malformedDelivered ? "accepted" : "refused").Append(' ').Append(changed).Append(' ');
+            if (s_malformedDelivered)
+                sb.Append(s_malformedDeliveredSequence).Append(' ').Append(s_malformedDeliveredLength);
+            else
+                sb.Append('-');
+            for (int i = 0; i < Endpoint.NumCounters; i++)
+                sb.Append(' ').Append(counters[i]);
+            sb.Append('\n');
+            s_out.Write(sb.ToString());
+        }
+    }
+
+    // ------------------------------------------------------------
     // scenario mode
 
     private const int MaxQueue = 8192;
@@ -473,13 +576,18 @@ internal static class Program
             RunVectors();
             result = 0;
         }
+        else if (args.Length >= 1 && args[0] == "malformed")
+        {
+            RunMalformed();
+            result = 0;
+        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 
