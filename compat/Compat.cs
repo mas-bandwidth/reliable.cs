@@ -561,6 +561,160 @@ internal static class Program
         return 0;
     }
 
+    // ------------------------------------------------------------
+    // fragment_window mode
+    //
+    // Differential pins for the fragment / received-window fix. A lone fragment
+    // must not move the received-packet window; only an accepted packet may. The
+    // crafted sequences of the C fix's cases A (512), B (32512) and C (an
+    // in-order fragmented packet at 0) are fed, each followed by a genuine
+    // sequence 0, both to a cold receiver and to one advanced to 1000, with a
+    // lone last fragment carrying zero and one payload byte. One line per input,
+    // byte for byte identical to compat.c.
+
+    private static bool s_fwDelivered;
+    private static ushort s_fwDeliveredSequence;
+    private static int s_fwDeliveredLength;
+
+    private static bool FwProcess(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
+    {
+        s_fwDelivered = true;
+        s_fwDeliveredSequence = sequence;
+        s_fwDeliveredLength = packetData.Length;
+        return true;
+    }
+
+    private static Endpoint FwEndpoint()
+    {
+        return new Endpoint(new EndpointConfig
+        {
+            Name = "fragment_window",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = FwProcess,
+        }, 100.0);
+    }
+
+    // a lone fragment: prefix 1, sequence LE, fragment id, count-1, then payload.
+    // fragment 0 embeds the canonical packet header, exactly like the sender.
+    private static int FwBuildFragment(byte[] buffer, ushort sequence, int fragmentId, int numFragments, int payloadBytes)
+    {
+        int p = 0;
+        buffer[p++] = 1;
+        buffer[p++] = (byte)(sequence & 0xFF);
+        buffer[p++] = (byte)(sequence >> 8);
+        buffer[p++] = (byte)fragmentId;
+        buffer[p++] = (byte)(numFragments - 1);
+        if (fragmentId == 0)
+            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, 0xFFFF, 0);
+        for (int i = 0; i < payloadBytes; i++)
+            buffer[p++] = (byte)(i + sequence);
+        return p;
+    }
+
+    private static int FwGenuineBytes(byte[] buffer)
+    {
+        int h = Wire.WritePacketHeader(buffer, 0, 0xFFFF, 0);
+        buffer[h] = 0;
+        return h + 1;
+    }
+
+    // advance the receiver to sequence 1000 with genuine in-order packets
+    private static void FwAdvance(Endpoint endpoint, int count)
+    {
+        byte[] packet = new byte[16];
+        for (int i = 0; i < count; i++)
+        {
+            int h = Wire.WritePacketHeader(packet, (ushort)i, 0xFFFF, 0);
+            packet[h] = 0;
+            endpoint.ReceivePacket(packet.AsSpan(0, h + 1));
+        }
+    }
+
+    private static void FwReport(string label, ushort sequence, bool refused, Endpoint endpoint)
+    {
+        StringBuilder sb = new StringBuilder(160);
+        sb.Append(label).Append(' ').Append(sequence).Append(' ').Append(refused ? "refused" : "accepted").Append(' ').Append(s_fwDelivered ? 1 : 0);
+        ReadOnlySpan<ulong> counters = endpoint.Counters;
+        for (int i = 0; i < counters.Length; i++)
+            sb.Append(' ').Append(counters[i]);
+        sb.Append('\n');
+        s_out.Write(sb.ToString());
+    }
+
+    private static void FwFragmentThenGenuine(string label, Endpoint endpoint, ushort sequence, int fragmentId, int numFragments, int payloadBytes)
+    {
+        byte[] fragment = new byte[600];
+        int fragmentBytes = FwBuildFragment(fragment, sequence, fragmentId, numFragments, payloadBytes);
+
+        ReadOnlySpan<ulong> counters = endpoint.Counters;
+        ulong before = counters[9]; // fragments_invalid
+
+        s_fwDelivered = false;
+        s_fwDeliveredSequence = 0;
+        s_fwDeliveredLength = 0;
+
+        endpoint.ReceivePacket(fragment.AsSpan(0, fragmentBytes));
+
+        bool refused = counters[9] != before;
+
+        byte[] genuine = new byte[16];
+        endpoint.ReceivePacket(genuine.AsSpan(0, FwGenuineBytes(genuine)));
+
+        FwReport(label, sequence, refused, endpoint);
+    }
+
+    private static void RunFragmentWindow()
+    {
+        // case A: in-window lone last fragment, then genuine sequence 0
+        {
+            Endpoint endpoint = FwEndpoint();
+            FwFragmentThenGenuine("A", endpoint, 512, 1, 2, 0);
+        }
+
+        // case B: out-of-window lone last fragment, then genuine sequence 0
+        {
+            Endpoint endpoint = FwEndpoint();
+            FwFragmentThenGenuine("B", endpoint, 32512, 1, 2, 0);
+        }
+
+        // case C: in-order fragmented packet at sequence 0 (500 + 250 = 1.5 x
+        // fragment_size), then a genuine sequence 0
+        {
+            Endpoint endpoint = FwEndpoint();
+            byte[] fragment = new byte[600];
+            endpoint.ReceivePacket(fragment.AsSpan(0, FwBuildFragment(fragment, 0, 0, 2, 500)));
+            endpoint.ReceivePacket(fragment.AsSpan(0, FwBuildFragment(fragment, 0, 1, 2, 250)));
+            byte[] genuine = new byte[16];
+            endpoint.ReceivePacket(genuine.AsSpan(0, FwGenuineBytes(genuine)));
+            FwReport("C", 0, false, endpoint);
+        }
+
+        // scan: every boundary sequence as a lone last fragment with zero and one
+        // payload byte, cold and advanced to 1000
+        ushort[] sequences =
+        {
+            0, 1, 255, 256, 511, 512, 513, 32511, 32512, 32513, 32768, 65280, 65535,
+        };
+
+        for (int i = 0; i < sequences.Length; i++)
+        {
+            for (int advanced = 0; advanced < 2; advanced++)
+            {
+                for (int payload = 0; payload < 2; payload++)
+                {
+                    Endpoint endpoint = FwEndpoint();
+                    if (advanced != 0)
+                        FwAdvance(endpoint, 1000);
+                    FwFragmentThenGenuine(advanced != 0 ? "adv" + payload : "cold" + payload, endpoint, sequences[i], 1, 2, payload);
+                }
+            }
+        }
+    }
+
     private static int Main(string[] args)
     {
         // buffer stdout: the scenario traces are hundreds of thousands of lines
@@ -581,13 +735,18 @@ internal static class Program
             RunMalformed();
             result = 0;
         }
+        else if (args.Length >= 1 && args[0] == "fragment_window")
+        {
+            RunFragmentWindow();
+            result = 0;
+        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 
