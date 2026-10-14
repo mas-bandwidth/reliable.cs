@@ -1035,13 +1035,14 @@ public sealed class Endpoint
     /// passed to the process callback; stale, duplicate and malformed packets are
     /// dropped and counted. Hostile input never throws.
     /// </summary>
-    /// <param name="packetData">The received datagram. Must not be empty.</param>
-    /// <exception cref="ArgumentException">The datagram is empty.</exception>
+    /// <param name="packetData">The received datagram. An empty datagram is counted invalid and dropped.</param>
     public void ReceivePacket(ReadOnlySpan<byte> packetData)
     {
         if (packetData.IsEmpty)
         {
-            throw new ArgumentException("packet data must not be empty", nameof(packetData));
+            if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] ignoring invalid packet. empty packet\n");
+            _counters[(int)EndpointCounter.NumPacketsInvalid]++;
+            return;
         }
 
         int packetBytes = packetData.Length;
