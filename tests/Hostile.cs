@@ -341,6 +341,24 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // an empty datagram is hostile input: counted invalid and dropped, never thrown
+
+    private static void TestReceiveEmptyPacketIsCountedInvalid()
+    {
+        int processed = 0;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { processed++; return true; },
+        }, 0.0);
+
+        sink.ReceivePacket(ReadOnlySpan<byte>.Empty);
+
+        Check(processed == 0, "empty packet does not call the process callback");
+        Check(sink.GetCounter(EndpointCounter.NumPacketsInvalid) == 1, "empty packet counted invalid");
+    }
+
+    // ------------------------------------------------------------
     // API misuse: configuration is validated at construction; wire data never throws
 
     private static void TestConfigValidation()

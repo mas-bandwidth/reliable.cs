@@ -88,6 +88,7 @@ internal static partial class Tests
         RunTest("test_unfinished_fragment_does_not_stale_packets", TestUnfinishedFragmentDoesNotStalePackets);
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
+        RunTest("test_receive_empty_packet_is_counted_invalid", TestReceiveEmptyPacketIsCountedInvalid);
         RunTest("test_config_validation", TestConfigValidation);
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
