@@ -265,6 +265,76 @@ internal static class Program
     }
 
     // ------------------------------------------------------------
+    // empty_packet mode
+
+    // one receiver, six inputs, in order: a zero-length packet, a one-byte
+    // packet {0}, a one-byte packet {1}, max_packet_size + 14 zero bytes, one
+    // byte more than that, then a valid packet from a sender. each line is
+    // <input> <refused|accepted> <process callback ran 0|1> <eleven counters>.
+    // counters accumulate on that same receiver. the C twin is run_empty_packet.
+    // identical text.
+
+    private static int s_emptyProcessRan;
+
+    private static void RunEmptyPacket()
+    {
+        EndpointConfig receiverConfig = new EndpointConfig
+        {
+            Name = "receiver",
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { s_emptyProcessRan = 1; return true; },
+        };
+        int limit = receiverConfig.MaxPacketSize + Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes;
+        Endpoint receiver = new Endpoint(receiverConfig, 0.0);
+
+        byte[]? sent = null;
+        Endpoint sender = new Endpoint(new EndpointConfig
+        {
+            Name = "sender",
+            TransmitPacket = (id, sequence, packetData) => { sent = packetData.ToArray(); },
+            ProcessPacket = (id, sequence, packetData) => true,
+        }, 0.0);
+
+        void Feed(string label, ReadOnlySpan<byte> packet)
+        {
+            s_emptyProcessRan = 0;
+            try
+            {
+                receiver.ReceivePacket(packet);
+            }
+            catch (ArgumentException)
+            {
+                // an empty datagram that throws is a refusal that counted nothing
+            }
+
+            ReadOnlySpan<ulong> counters = receiver.Counters;
+            StringBuilder sb = new StringBuilder(160);
+            sb.Append(label).Append(' ').Append(s_emptyProcessRan != 0 ? "accepted" : "refused").Append(' ').Append(s_emptyProcessRan);
+            for (int i = 0; i < Endpoint.NumCounters; i++)
+                sb.Append(' ').Append(counters[i]);
+            sb.Append('\n');
+            s_out.Write(sb.ToString());
+        }
+
+        Feed("zero-length", ReadOnlySpan<byte>.Empty);
+        Feed("byte-0", new byte[] { 0 });
+        Feed("byte-1", new byte[] { 1 });
+
+        byte[] zeros = new byte[limit + 1];
+        Feed("max-plus-14", zeros.AsSpan(0, limit));
+        Feed("max-plus-15", zeros.AsSpan(0, limit + 1));
+
+        sender.SendPacket(new byte[] { 0x11 });
+        if (sent == null || sent.Length == 0)
+        {
+            Console.Error.WriteLine("empty_packet: sender produced no packet");
+            s_out.Flush();
+            Environment.Exit(1);
+        }
+        Feed("valid", sent);
+    }
+
+    // ------------------------------------------------------------
     // scenario mode
 
     private const int MaxQueue = 8192;
@@ -740,13 +810,18 @@ internal static class Program
             RunFragmentWindow();
             result = 0;
         }
+        else if (args.Length >= 1 && args[0] == "empty_packet")
+        {
+            RunEmptyPacket();
+            result = 0;
+        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat empty_packet | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 

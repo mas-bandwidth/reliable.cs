@@ -5,9 +5,10 @@
 #   scripts/interop.sh [path-to-c-reliable-clone]
 #
 # Builds the C half of the compat harness against the real reliable.c, then runs
-# both halves across the wire-vector mode and the scripted scenario profiles
-# (clean, lossy, hostile — the hostile long run is the differential soak), and
-# diffs the outputs. Any byte of difference fails the gate.
+# both halves across the wire-vector mode, the empty-packet refusal, and the
+# scripted scenario profiles (clean, lossy, hostile — the hostile long run is
+# the differential soak), and diffs the outputs. Any byte of difference fails
+# the gate.
 #
 # CI pins the C clone to a release tag (see .github/workflows/ci.yml) and runs
 # this with CC=clang; locally the default compiler is fine and the clone may
@@ -42,7 +43,13 @@ trap 'rm -rf "$WORK"' EXIT
 # is the normative behavior (same rule as the serialize.cs interop gate).
 echo "== building C compat harness against $C_RELIABLE"
 echo "== C compiler: $CC ($(command -v "$CC")) $("$CC" --version | head -1) $FP_CONTRACT"
-"$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$C_RELIABLE/reliable.c" -lm
+# Since 1.4.2 the header codecs are static. The harness calls them, so this
+# build copy gives those two functions external linkage and changes nothing else.
+sed \
+    -e 's/^static int reliable_write_packet_header/int reliable_write_packet_header/' \
+    -e 's/^static int reliable_read_packet_header/int reliable_read_packet_header/' \
+    "$C_RELIABLE/reliable.c" > "$WORK/reliable.c"
+"$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$WORK/reliable.c" -lm
 
 echo "== building C# compat harness"
 dotnet build -c Release compat/Compat.csproj --nologo -v q
@@ -64,6 +71,7 @@ gate() {
     wc -l < "$WORK/c.out" | awk '{print "   identical ("$1" trace lines)"}'
 }
 
+gate "empty packet on one receiver"    empty_packet
 gate "wire vectors"                    vectors
 gate "malformed inputs"                malformed
 gate "fragment window"                 fragment_window

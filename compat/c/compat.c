@@ -22,6 +22,13 @@
                                        processed packet (FNV-1a 64 of the bytes),
                                        per-iteration acks, and periodic + final
                                        counters and stats (float bit patterns).
+      empty_packet                     one receiver, six inputs in order: a
+                                       zero-length packet, {0}, {1},
+                                       max_packet_size+14 zero bytes, one byte
+                                       more than that, then a valid packet from
+                                       a sender. each line is the input, whether
+                                       it was refused, whether the process
+                                       callback ran, and the eleven counters.
 
     All randomness comes from the shared PRNG in an exactly specified draw order;
     the C# side replicates it draw for draw. rand() is never used.
@@ -233,7 +240,7 @@ static void run_malformed( void )
     uint8_t oversize[MALFORMED_MAX_PACKET + 16];
     memset( oversize, 0, sizeof( oversize ) );
 
-    static const struct { const uint8_t * data; int bytes; const char * label; } vectors[] =
+    const struct { const uint8_t * data; int bytes; const char * label; } vectors[] =
     {
         { (const uint8_t *) "",              0,  "zero-length" },
         { oversize,                          sizeof( oversize ), "oversize" },
@@ -285,6 +292,125 @@ static void run_malformed( void )
 
         reliable_endpoint_destroy( endpoint );
     }
+}
+
+/* ---------------------------------------------------------------- */
+/* empty_packet mode                                                */
+
+/* one receiver, six inputs, in order: a zero-length packet, a one-byte
+   packet {0}, a one-byte packet {1}, max_packet_size + 14 zero bytes, one
+   byte more than that, then a valid packet from a sender. each line is
+   <input> <refused|accepted> <process callback ran 0|1> <eleven counters>.
+   counters accumulate on that same receiver. the C# twin is RunEmptyPacket.
+   identical text. */
+
+static int empty_process_ran;
+static uint8_t empty_sent[64];
+static int empty_sent_bytes;
+
+static int empty_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    empty_process_ran = 1;
+    return 1;
+}
+
+static int empty_process_ignore( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static void empty_transmit_ignore( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static void empty_transmit_capture( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence;
+    if ( packet_bytes <= 0 || packet_bytes > (int) sizeof( empty_sent ) )
+    {
+        fprintf( stderr, "empty_packet: sent packet does not fit (%d)\n", packet_bytes );
+        exit( 1 );
+    }
+    memcpy( empty_sent, packet_data, (size_t) packet_bytes );
+    empty_sent_bytes = packet_bytes;
+}
+
+static void empty_print( const char * label, struct reliable_endpoint_t * endpoint )
+{
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    printf( "%s %s %d", label, empty_process_ran ? "accepted" : "refused", empty_process_ran );
+    int i;
+    for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
+}
+
+static void empty_feed( const char * label, struct reliable_endpoint_t * endpoint, uint8_t * data, int bytes )
+{
+    empty_process_ran = 0;
+    reliable_endpoint_receive_packet( endpoint, data, bytes );
+    empty_print( label, endpoint );
+}
+
+static void run_empty_packet( void )
+{
+    struct reliable_config_t receiver_config;
+    reliable_default_config( &receiver_config );
+    reliable_copy_string( receiver_config.name, "receiver", sizeof( receiver_config.name ) );
+    receiver_config.transmit_packet_function = empty_transmit_ignore;
+    receiver_config.process_packet_function = empty_process;
+
+    struct reliable_config_t sender_config;
+    reliable_default_config( &sender_config );
+    reliable_copy_string( sender_config.name, "sender", sizeof( sender_config.name ) );
+    sender_config.transmit_packet_function = empty_transmit_capture;
+    sender_config.process_packet_function = empty_process_ignore;
+
+    struct reliable_endpoint_t * receiver = reliable_endpoint_create( &receiver_config, 0.0 );
+    struct reliable_endpoint_t * sender = reliable_endpoint_create( &sender_config, 0.0 );
+    if ( !receiver || !sender )
+    {
+        fprintf( stderr, "empty_packet: endpoint create failed\n" );
+        exit( 1 );
+    }
+
+    int max_packet_size = receiver_config.max_packet_size;
+    int limit = max_packet_size + RELIABLE_MAX_PACKET_HEADER_BYTES + RELIABLE_FRAGMENT_HEADER_BYTES;
+    uint8_t * zeros = (uint8_t *) calloc( (size_t) limit + 1, 1 );
+    if ( !zeros )
+    {
+        fprintf( stderr, "empty_packet: out of memory\n" );
+        exit( 1 );
+    }
+
+    uint8_t sentinel = 0x2A;
+    empty_feed( "zero-length", receiver, &sentinel, 0 );
+
+    uint8_t byte0 = 0;
+    empty_feed( "byte-0", receiver, &byte0, 1 );
+
+    uint8_t byte1 = 1;
+    empty_feed( "byte-1", receiver, &byte1, 1 );
+
+    empty_feed( "max-plus-14", receiver, zeros, limit );
+    empty_feed( "max-plus-15", receiver, zeros, limit + 1 );
+
+    uint8_t payload = 0x11;
+    empty_sent_bytes = 0;
+    reliable_endpoint_send_packet( sender, &payload, 1 );
+    if ( empty_sent_bytes <= 0 )
+    {
+        fprintf( stderr, "empty_packet: sender produced no packet\n" );
+        exit( 1 );
+    }
+    empty_feed( "valid", receiver, empty_sent, empty_sent_bytes );
+
+    free( zeros );
+    reliable_endpoint_destroy( receiver );
+    reliable_endpoint_destroy( sender );
 }
 
 /* ---------------------------------------------------------------- */
@@ -805,13 +931,17 @@ int main( int argc, char ** argv )
     {
         run_fragment_window();
     }
+    else if ( argc >= 2 && strcmp( argv[1], "empty_packet" ) == 0 )
+    {
+        run_empty_packet();
+    }
     else if ( argc >= 5 && strcmp( argv[1], "scenario" ) == 0 )
     {
         run_scenario( argv[2], strtoull( argv[3], NULL, 10 ), atoi( argv[4] ) );
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat malformed | compat fragment_window | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat malformed | compat fragment_window | compat empty_packet | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 
