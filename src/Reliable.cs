@@ -1192,6 +1192,13 @@ public sealed class Endpoint
                 return;
             }
 
+            if (!_receivedPackets.TestInsert(sequence))
+            {
+                if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] ignoring stale fragment {sequence}\n");
+                _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
+                return;
+            }
+
             int reassemblyIndex = _fragmentReassembly.Find(sequence);
 
             if (reassemblyIndex < 0)
@@ -1204,8 +1211,6 @@ public sealed class Endpoint
                     _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
                     return;
                 }
-
-                _receivedPackets.Advance(sequence);
 
                 int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * _fragmentSize;
 
