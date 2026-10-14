@@ -66,6 +66,7 @@ gate() {
 
 gate "wire vectors"                    vectors
 gate "malformed inputs"                malformed
+gate "fragment window"                 fragment_window
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500

@@ -65,30 +65,30 @@ internal static partial class Tests
     // ------------------------------------------------------------
     // every fragment rejection rule, one deliberate violation each
 
+    // helper: build a valid fragment for a given id/total with an embedded
+    // canonical header on fragment 0
+    private static byte[] BuildFragment(ushort sequence, int fragmentId, int numFragments, int dataBytes, ushort ack, uint ackBits)
+    {
+        byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + dataBytes];
+        int p = 0;
+        buffer[p++] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
+        p += 2;
+        buffer[p++] = (byte)fragmentId;
+        buffer[p++] = (byte)(numFragments - 1);
+        if (fragmentId == 0)
+        {
+            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, ack, ackBits);
+        }
+        for (int i = 0; i < dataBytes; i++)
+        {
+            buffer[p++] = (byte)(i + sequence);
+        }
+        return buffer.AsSpan(0, p).ToArray();
+    }
+
     private static void TestHostileFragments()
     {
-        // helper: build a valid fragment for a given id/total with an embedded
-        // canonical header on fragment 0
-        static byte[] BuildFragment(ushort sequence, int fragmentId, int numFragments, int dataBytes, ushort ack, uint ackBits)
-        {
-            byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + dataBytes];
-            int p = 0;
-            buffer[p++] = 1;
-            BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
-            p += 2;
-            buffer[p++] = (byte)fragmentId;
-            buffer[p++] = (byte)(numFragments - 1);
-            if (fragmentId == 0)
-            {
-                p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, ack, ackBits);
-            }
-            for (int i = 0; i < dataBytes; i++)
-            {
-                buffer[p++] = (byte)(i + sequence);
-            }
-            return buffer.AsSpan(0, p).ToArray();
-        }
-
         Endpoint sink;
         Func<int> processed;
 
@@ -203,6 +203,63 @@ internal static partial class Tests
             sink.ReceivePacket(packet.AsSpan(0, headerBytes + 8001));
             Check(sink.GetCounter(EndpointCounter.NumPacketsTooLargeToReceive) == 1, "oversized payload rejected");
             Check(processed() == 0, "oversized payload not processed");
+        }
+    }
+
+    // ------------------------------------------------------------
+    // an unfinished fragment must not advance the received-packet window: only an
+    // accepted packet moves it, so a lone fragment cannot make genuine in-flight
+    // packets look stale (the C fix, mas-bandwidth/reliable PR 68)
+
+    private static void TestUnfinishedFragmentDoesNotStalePackets()
+    {
+        // case A: a lone last fragment at sequence 512 (inside the window) is held
+        // for reassembly; a genuine sequence 0 afterwards is delivered, not stale
+        {
+            Endpoint sink = MakeSink(out Func<int> processed);
+            sink.ReceivePacket(BuildFragment(512, 1, 2, 0, 0, 0));
+            byte[] genuine = new byte[Wire.MaxPacketHeaderBytes];
+            int genuineBytes = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
+            sink.ReceivePacket(genuine.AsSpan(0, genuineBytes));
+            Check(processed() == 1, "case A: genuine sequence 0 delivered after a fragment at 512");
+            Check(sink.GetCounter(EndpointCounter.NumPacketsStale) == 0, "case A: fragment must not stale genuine packets");
+        }
+
+        // case B: a lone last fragment at sequence 32512 (outside the window) is
+        // refused and counted invalid before any reassembly entry exists; a
+        // genuine sequence 0 afterwards is still delivered
+        {
+            Endpoint sink = MakeSink(out Func<int> processed);
+            sink.ReceivePacket(BuildFragment(32512, 1, 2, 0, 0, 0));
+            Check(sink.GetCounter(EndpointCounter.NumFragmentsInvalid) == 1, "case B: out-of-window fragment refused");
+            Check(!sink.FragmentReassemblyExists(32512), "case B: refused fragment leaves no reassembly entry");
+            byte[] genuine = new byte[Wire.MaxPacketHeaderBytes];
+            int genuineBytes = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
+            sink.ReceivePacket(genuine.AsSpan(0, genuineBytes));
+            Check(processed() == 1, "case B: genuine sequence 0 delivered");
+            Check(sink.GetCounter(EndpointCounter.NumPacketsStale) == 0, "case B: refused fragment must not stale genuine packets");
+        }
+
+        // case C: an in-order fragmented packet (500 + 250 = 1.5 x fragment_size)
+        // at sequence 0 reassembles from two fragments and delivers at full size
+        {
+            int deliveredLength = -1;
+            ushort deliveredSequence = 0xFFFF;
+            Endpoint sink = new Endpoint(new EndpointConfig
+            {
+                Name = "sink",
+                MaxPacketSize = 8000,
+                FragmentAbove = 500,
+                FragmentSize = 500,
+                MaxFragments = 16,
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => { deliveredSequence = sequence; deliveredLength = packetData.Length; return true; },
+            }, 100.0);
+            sink.ReceivePacket(BuildFragment(0, 0, 2, 500, 0xFFFF, 0));
+            sink.ReceivePacket(BuildFragment(0, 1, 2, 250, 0xFFFF, 0));
+            Check(deliveredSequence == 0, "case C: reassembled packet delivered at sequence 0");
+            Check(deliveredLength == 750, $"case C: reassembled packet delivered at full size, got {deliveredLength}");
+            Check(!sink.FragmentReassemblyExists(0), "case C: reassembly slot cleaned up");
         }
     }
 

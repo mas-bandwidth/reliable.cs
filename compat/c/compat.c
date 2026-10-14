@@ -613,6 +613,177 @@ static void run_scenario( const char * profile, uint64_t seed, int iterations )
 }
 
 /* ---------------------------------------------------------------- */
+/* fragment_window mode                                             */
+/*
+    Differential pins for the fragment / received-window fix (C PR 68).
+
+    A lone fragment must not move the received-packet window: only an accepted
+    packet may. The crafted sequences of the C fix's cases A (512), B (32512)
+    and C (an in-order fragmented packet at 0) are fed, each followed by a
+    genuine sequence 0, both to a cold receiver and to one already advanced to
+    1000, with a lone last fragment carrying zero and one payload byte. One
+    line per input, byte for byte identical to Compat.cs.
+*/
+
+static int fw_delivered;
+static uint16_t fw_delivered_sequence;
+static int fw_delivered_length;
+
+static int fw_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) packet_data;
+    fw_delivered = 1;
+    fw_delivered_sequence = sequence;
+    fw_delivered_length = packet_bytes;
+    return 1;
+}
+
+static void fw_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static struct reliable_endpoint_t * fw_endpoint( void )
+{
+    struct reliable_config_t config;
+    reliable_default_config( &config );
+    reliable_copy_string( config.name, "fragment_window", sizeof( config.name ) );
+    config.max_packet_size = 8000;
+    config.fragment_above = 500;
+    config.fragment_size = 500;
+    config.max_fragments = 16;
+    config.transmit_packet_function = fw_transmit;
+    config.process_packet_function = fw_process;
+    return reliable_endpoint_create( &config, 100.0 );
+}
+
+/* a lone fragment: prefix 1, sequence LE, fragment id, count-1, then payload.
+   fragment 0 embeds the canonical packet header, exactly like the sender. */
+static int fw_build_fragment( uint8_t * buffer, uint16_t sequence, int fragment_id, int num_fragments, int payload_bytes )
+{
+    int p = 0;
+    buffer[p++] = 1;
+    buffer[p++] = (uint8_t) ( sequence & 0xFF );
+    buffer[p++] = (uint8_t) ( sequence >> 8 );
+    buffer[p++] = (uint8_t) fragment_id;
+    buffer[p++] = (uint8_t) ( num_fragments - 1 );
+    if ( fragment_id == 0 )
+        p += reliable_write_packet_header( buffer + p, sequence, 0xFFFF, 0 );
+    for ( int i = 0; i < payload_bytes; i++ )
+        buffer[p++] = (uint8_t) ( i + sequence );
+    return p;
+}
+
+static int fw_genuine_bytes( uint8_t * buffer )
+{
+    int h = reliable_write_packet_header( buffer, 0, 0xFFFF, 0 );
+    buffer[h] = 0;
+    return h + 1;
+}
+
+/* advance the receiver to sequence 1000 with genuine in-order packets */
+static void fw_advance( struct reliable_endpoint_t * endpoint, int count )
+{
+    uint8_t packet[16];
+    for ( int i = 0; i < count; i++ )
+    {
+        int h = reliable_write_packet_header( packet, (uint16_t) i, 0xFFFF, 0 );
+        packet[h] = 0;
+        reliable_endpoint_receive_packet( endpoint, packet, h + 1 );
+    }
+}
+
+static void fw_report( const char * label, uint16_t sequence, int refused, struct reliable_endpoint_t * endpoint )
+{
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    printf( "%s %u %s %d", label, sequence, refused ? "refused" : "accepted", fw_delivered ? 1 : 0 );
+    for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
+}
+
+/* feed one fragment then a genuine sequence 0, and report the result */
+static void fw_fragment_then_genuine( const char * label, struct reliable_endpoint_t * endpoint,
+                                      uint16_t sequence, int fragment_id, int num_fragments, int payload_bytes )
+{
+    uint8_t fragment[600];
+    int fragment_bytes = fw_build_fragment( fragment, sequence, fragment_id, num_fragments, payload_bytes );
+
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    uint64_t before = counters[9]; /* fragments_invalid */
+
+    fw_delivered = 0;
+    fw_delivered_sequence = 0;
+    fw_delivered_length = 0;
+
+    reliable_endpoint_receive_packet( endpoint, fragment, fragment_bytes );
+
+    int refused = counters[9] != before;
+
+    uint8_t genuine[16];
+    reliable_endpoint_receive_packet( endpoint, genuine, fw_genuine_bytes( genuine ) );
+
+    fw_report( label, sequence, refused, endpoint );
+}
+
+static void run_fragment_window( void )
+{
+    /* case A: in-window lone last fragment, then genuine sequence 0 */
+    {
+        struct reliable_endpoint_t * endpoint = fw_endpoint();
+        fw_fragment_then_genuine( "A", endpoint, 512, 1, 2, 0 );
+        reliable_endpoint_destroy( endpoint );
+    }
+
+    /* case B: out-of-window lone last fragment, then genuine sequence 0 */
+    {
+        struct reliable_endpoint_t * endpoint = fw_endpoint();
+        fw_fragment_then_genuine( "B", endpoint, 32512, 1, 2, 0 );
+        reliable_endpoint_destroy( endpoint );
+    }
+
+    /* case C: in-order fragmented packet at sequence 0 (500 + 250 = 1.5 x
+       fragment_size), then a genuine sequence 0 */
+    {
+        struct reliable_endpoint_t * endpoint = fw_endpoint();
+        uint8_t fragment[600];
+        int first = fw_build_fragment( fragment, 0, 0, 2, 500 );
+        reliable_endpoint_receive_packet( endpoint, fragment, first );
+        int second = fw_build_fragment( fragment, 0, 1, 2, 250 );
+        reliable_endpoint_receive_packet( endpoint, fragment, second );
+        uint8_t genuine[16];
+        reliable_endpoint_receive_packet( endpoint, genuine, fw_genuine_bytes( genuine ) );
+        fw_report( "C", 0, 0, endpoint );
+        reliable_endpoint_destroy( endpoint );
+    }
+
+    /* scan: every boundary sequence as a lone last fragment with zero and one
+       payload byte, cold and advanced to 1000 */
+    static const uint16_t sequences[] =
+    {
+        0, 1, 255, 256, 511, 512, 513, 32511, 32512, 32513, 32768, 65280, 65535,
+    };
+    int num_sequences = (int) ( sizeof( sequences ) / sizeof( sequences[0] ) );
+
+    for ( int i = 0; i < num_sequences; i++ )
+    {
+        for ( int advanced = 0; advanced < 2; advanced++ )
+        {
+            for ( int payload = 0; payload < 2; payload++ )
+            {
+                struct reliable_endpoint_t * endpoint = fw_endpoint();
+                if ( advanced )
+                    fw_advance( endpoint, 1000 );
+                char label[8];
+                snprintf( label, sizeof( label ), "%s%d", advanced ? "adv" : "cold", payload );
+                fw_fragment_then_genuine( label, endpoint, sequences[i], 1, 2, payload );
+                reliable_endpoint_destroy( endpoint );
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
 
 int main( int argc, char ** argv )
 {
@@ -630,13 +801,17 @@ int main( int argc, char ** argv )
     {
         run_malformed();
     }
+    else if ( argc >= 2 && strcmp( argv[1], "fragment_window" ) == 0 )
+    {
+        run_fragment_window();
+    }
     else if ( argc >= 5 && strcmp( argv[1], "scenario" ) == 0 )
     {
         run_scenario( argv[2], strtoull( argv[3], NULL, 10 ), atoi( argv[4] ) );
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat malformed | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat malformed | compat fragment_window | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 
