@@ -785,6 +785,234 @@ internal static class Program
         }
     }
 
+    // ------------------------------------------------------------
+    // config_refusal mode
+    //
+    // Differential pins for the config validation carried from the C reference
+    // (R3: sequence-buffer sizes are powers of two no larger than 16384; R4: the
+    // header-plus-packet bound is computed in 64 bits). One line per input, byte
+    // for byte identical to c/compat.c: `<field> <value> <created|refused>`, and
+    // for a created config an `ack <n>` line after a one-byte send is acked by a
+    // peer through the in-memory callbacks.
+
+    private static Endpoint? s_cfgSender;
+    private static Endpoint? s_cfgReceiver;
+
+    private static void CfgTransmit(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
+    {
+        if (id == 0)
+            s_cfgReceiver!.ReceivePacket(packetData);
+        else
+            s_cfgSender!.ReceivePacket(packetData);
+    }
+
+    private static bool CfgProcess(ulong id, ushort sequence, ReadOnlySpan<byte> packetData) => true;
+
+    private static readonly string[] CfgFieldNames =
+    {
+        "sent_packets_buffer_size",
+        "received_packets_buffer_size",
+        "fragment_reassembly_buffer_size",
+    };
+
+    private static void CfgSetField(EndpointConfig config, int field, int value)
+    {
+        if (field == 0)
+            config.SentPacketsBufferSize = value;
+        else if (field == 1)
+            config.ReceivedPacketsBufferSize = value;
+        else
+            config.FragmentReassemblyBufferSize = value;
+    }
+
+    private static void CfgAckTest(int field, int value)
+    {
+        EndpointConfig senderConfig = new EndpointConfig { Name = "sender", Id = 0, TransmitPacket = CfgTransmit, ProcessPacket = CfgProcess };
+        CfgSetField(senderConfig, field, value);
+        EndpointConfig receiverConfig = new EndpointConfig { Name = "receiver", Id = 1, TransmitPacket = CfgTransmit, ProcessPacket = CfgProcess };
+
+        s_cfgSender = new Endpoint(senderConfig, 100.0);
+        s_cfgReceiver = new Endpoint(receiverConfig, 100.0);
+
+        byte[] packet = new byte[1];
+
+        s_cfgSender.SendPacket(packet);
+        s_cfgSender.Update(100.1);
+        s_cfgReceiver.Update(100.1);
+        s_cfgReceiver.SendPacket(packet);
+        s_cfgSender.Update(100.1);
+
+        s_out.Write($"ack {s_cfgSender.GetAcks().Length}\n");
+    }
+
+    private static void RunConfigRefusal()
+    {
+        int[] values = { 0, 1, 2, 3, 100, 255, 256, 257, 16383, 16384, 16385, 32768, 65535, 65536, 65537 };
+
+        for (int field = 0; field < 3; field++)
+        {
+            foreach (int value in values)
+            {
+                EndpointConfig config = new EndpointConfig { Name = "cfg", TransmitPacket = CfgTransmit, ProcessPacket = CfgProcess };
+                CfgSetField(config, field, value);
+
+                try
+                {
+                    _ = new Endpoint(config, 0.0);
+                    s_out.Write($"{CfgFieldNames[field]} {value} created\n");
+                    CfgAckTest(field, value);
+                }
+                catch (ArgumentException)
+                {
+                    s_out.Write($"{CfgFieldNames[field]} {value} refused\n");
+                }
+            }
+        }
+
+        // R4: packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX.
+        // the three edge configs vary only the header and max packet size, so the
+        // fragment-cover bound refuses each before any allocation; that refusal is
+        // what the differential pins for these inputs.
+        (int header, int max)[] r4 =
+        {
+            (28, int.MaxValue - 14 - 28),
+            (28, int.MaxValue - 14 - 28 + 1),
+            (9, int.MaxValue - 23),
+        };
+
+        foreach ((int header, int max) in r4)
+        {
+            EndpointConfig config = new EndpointConfig { Name = "cfg", TransmitPacket = CfgTransmit, ProcessPacket = CfgProcess };
+            config.PacketHeaderSize = header;
+            config.MaxPacketSize = max;
+
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+                s_out.Write($"header_plus_max {header} {max} created\n");
+            }
+            catch (ArgumentException)
+            {
+                s_out.Write($"header_plus_max {header} {max} refused\n");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // hardening mode
+    //
+    // Differential pins for the hardening carried from the C 1.4.x releases:
+    // Reset clears every statistic, the rtt minimum is decided by a sample count
+    // (so a minimum of 10000 ms or more is reported), and the reassembly buffer
+    // is zeroed. One line per step, byte for byte identical to c/compat.c; every
+    // float is printed as its raw 32-bit pattern.
+
+    private static Endpoint? s_hwSender;
+    private static Endpoint? s_hwReceiver;
+    private static bool s_hwDrop;
+
+    private static void HwTransmit(ulong id, ushort sequence, ReadOnlySpan<byte> packetData)
+    {
+        if (s_hwDrop)
+        {
+            s_hwDrop = false;
+            return;
+        }
+        if (id == 0)
+            s_hwReceiver!.ReceivePacket(packetData);
+        else
+            s_hwSender!.ReceivePacket(packetData);
+    }
+
+    private static bool HwProcess(ulong id, ushort sequence, ReadOnlySpan<byte> packetData) => true;
+
+    private static void HwPair(double time)
+    {
+        s_hwSender = new Endpoint(new EndpointConfig { Name = "sender", Id = 0, TransmitPacket = HwTransmit, ProcessPacket = HwProcess }, time);
+        s_hwReceiver = new Endpoint(new EndpointConfig { Name = "receiver", Id = 1, TransmitPacket = HwTransmit, ProcessPacket = HwProcess }, time);
+    }
+
+    private static void PrintHardeningLine(string step, Endpoint endpoint)
+    {
+        s_out.Write($"{step} rtt {FloatBits(endpoint.Rtt):x8} rtt_min {FloatBits(endpoint.RttMin):x8} rtt_max {FloatBits(endpoint.RttMax):x8} rtt_avg {FloatBits(endpoint.RttAvg):x8} jitter_avg {FloatBits(endpoint.JitterAvgVsMinRtt):x8} jitter_max {FloatBits(endpoint.JitterMaxVsMinRtt):x8} jitter_stddev {FloatBits(endpoint.JitterStddevVsAvgRtt):x8} loss {FloatBits(endpoint.PacketLoss):x8} sent_kbps {FloatBits(endpoint.SentBandwidthKbps):x8} received_kbps {FloatBits(endpoint.ReceivedBandwidthKbps):x8} acked_kbps {FloatBits(endpoint.AckedBandwidthKbps):x8}\n");
+    }
+
+    private static void RunHardening()
+    {
+        double time = 100.0;
+        HwPair(time);
+
+        byte[] packet = new byte[64];
+        for (int i = 0; i < 200; i++)
+        {
+            for (int j = 0; j < packet.Length; j++)
+                packet[j] = (byte)i;
+
+            s_hwDrop = (i % 10 == 0);
+            s_hwSender!.SendPacket(packet.AsSpan(0, 8 + (i % 40)));
+
+            time += 0.016;
+            s_hwSender.Update(time);
+            s_hwReceiver!.Update(time);
+
+            s_hwDrop = (i % 15 == 0);
+            s_hwReceiver.SendPacket(packet.AsSpan(0, 8 + ((i * 7) % 40)));
+
+            time += 0.016;
+            s_hwSender.Update(time);
+            s_hwReceiver.Update(time);
+
+            s_hwSender.ClearAcks();
+            s_hwReceiver.ClearAcks();
+        }
+
+        PrintHardeningLine("before_reset", s_hwSender!);
+
+        s_hwSender!.Reset();
+        s_hwReceiver!.Reset();
+        PrintHardeningLine("after_reset", s_hwSender!);
+
+        // the rtt minimum is decided by a sample count, not a sentinel: samples of
+        // 10000, 12000 and 20000 ms must report a minimum of 10000, not 0
+        time = 100.0;
+        HwPair(time);
+
+        byte[] tiny = new byte[8];
+
+        s_hwSender!.SendPacket(tiny);
+        time += 10.0;
+        s_hwSender.Update(time);
+        s_hwReceiver!.Update(time);
+        s_hwReceiver.SendPacket(tiny);
+        s_hwSender.Update(time);
+        s_hwSender.ClearAcks();
+        s_hwReceiver.ClearAcks();
+
+        s_hwSender.SendPacket(tiny);
+        time += 12.0;
+        s_hwSender.Update(time);
+        s_hwReceiver.Update(time);
+        s_hwReceiver.SendPacket(tiny);
+        s_hwSender.Update(time);
+        s_hwSender.ClearAcks();
+        s_hwReceiver.ClearAcks();
+
+        s_hwSender.SendPacket(tiny);
+        time += 20.0;
+        s_hwSender.Update(time);
+        s_hwReceiver.Update(time);
+        s_hwReceiver.SendPacket(tiny);
+        s_hwSender.Update(time);
+        s_hwSender.ClearAcks();
+        s_hwReceiver.ClearAcks();
+
+        PrintHardeningLine("large_rtt", s_hwSender);
+
+        // a fresh endpoint before any sample reports zero everywhere
+        HwPair(0.0);
+        PrintHardeningLine("fresh", s_hwSender!);
+    }
+
     private static int Main(string[] args)
     {
         // buffer stdout: the scenario traces are hundreds of thousands of lines
@@ -815,13 +1043,23 @@ internal static class Program
             RunEmptyPacket();
             result = 0;
         }
+        else if (args.Length >= 1 && args[0] == "config_refusal")
+        {
+            RunConfigRefusal();
+            result = 0;
+        }
+        else if (args.Length >= 1 && args[0] == "hardening")
+        {
+            RunHardening();
+            result = 0;
+        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat empty_packet | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat empty_packet | Compat config_refusal | Compat hardening | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 

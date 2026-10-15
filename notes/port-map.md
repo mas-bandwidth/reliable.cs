@@ -20,7 +20,7 @@ the wire is concerned; the API is what a careful C# expert would write.
 | `reliable_endpoint_free_packet` | — (dropped) | C-allocator API; meaningless under GC. |
 | `reliable_endpoint_get_acks` | `Endpoint.GetAcks()` → `ReadOnlySpan<ushort>` | Span over the internal ack array, valid until `ClearAcks`/`Reset`. |
 | `reliable_endpoint_clear_acks` | `Endpoint.ClearAcks()` | |
-| `reliable_endpoint_reset` | `Endpoint.Reset()` | Clears acks, counters, sequence, all three buffers; returns in-flight reassembly buffers to the pool. |
+| `reliable_endpoint_reset` | `Endpoint.Reset()` | Clears acks, counters, sequence, all three buffers and every statistic (rtt, min/max/avg, the three jitters, packet loss, the three bandwidths); refills the rtt history with -1; returns in-flight reassembly buffers to the pool. |
 | `reliable_endpoint_update` | `Endpoint.Update(double time)` | Same stats math, same op order (see "stats math"). |
 | `reliable_endpoint_rtt` (+ min/max/avg) | `Rtt`, `RttMin`, `RttMax`, `RttAvg` properties | |
 | `reliable_endpoint_jitter_*` | `JitterAvgVsMinRtt`, `JitterMaxVsMinRtt`, `JitterStddevVsAvgRtt` | |

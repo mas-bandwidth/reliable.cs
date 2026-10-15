@@ -134,14 +134,20 @@ C# programmer would expect. The differences, all recorded in
 - The C library's debug-only configuration asserts are construction-time
   `ArgumentException`s here — validated once, at `new Endpoint(...)`, never
   per packet. That includes the send path's fragment-count assert, checked at
-  construction as "MaxFragments must cover MaxPacketSize".
+  construction as "MaxFragments must cover MaxPacketSize". The three sequence
+  buffers (`SentPacketsBufferSize`, `ReceivedPacketsBufferSize`,
+  `FragmentReassemblyBufferSize`) must each be a power of two no larger than
+  16384, and the C reference's other bounds hold too (fragment_above may not
+  exceed max_packet_size; max_fragments * fragment_size, max_packet_size and
+  packet_header_size + max_packet_size are each checked against INT_MAX).
 - An empty send throws (the C library asserts `packet_bytes > 0` on send).
   An empty receive is hostile input: it is counted invalid and dropped, and
   it does not throw. Oversized payloads are dropped and counted, exactly like C.
 - `ProcessPacket` receives a read-only span (the C callback gets a mutable
   pointer); copy if you need to mutate.
 - No `Dispose`: the endpoint owns no unmanaged resources. `Reset()` matches
-  `reliable_endpoint_reset` (and like it, does not clear smoothed stats).
+  `reliable_endpoint_reset`: acks, counters, sequence, every statistic and
+  all tracking buffers are cleared, and the rtt history is refilled with -1.
 
 ## License
 
