@@ -52,7 +52,12 @@ sed \
 "$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$WORK/reliable.c" -lm
 
 echo "== building C# compat harness"
-dotnet build -c Release compat/Compat.csproj --nologo -v q
+# -m:1 -nr:false: build in this process only. MSBuild worker nodes hang in
+# sandboxed environments where the runtime's shared-memory directory
+# (/tmp/.dotnet/shm) is not writable and is redirected out from under it, and
+# a hung node fails the gate after the node-connection timeout with no error;
+# a single-node build is slower but immune, and the gate is not build-bound.
+dotnet build -c Release compat/Compat.csproj --nologo -v q -m:1 -nr:false
 
 run_cs() {
     dotnet run -c Release --project compat/Compat.csproj --no-build -- "$@"
