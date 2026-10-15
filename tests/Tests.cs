@@ -77,6 +77,8 @@ internal static partial class Tests
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_rtt", TestRtt);
         RunTest("test_endpoint_reset", TestEndpointReset);
+        RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
+        RunTest("test_rtt_min_large", TestRttMinLarge);
 
         // golden wire pins, generated from the real C library (v1.4.0)
         RunTest("test_golden_packet_headers", TestGoldenPacketHeaders);
@@ -90,6 +92,9 @@ internal static partial class Tests
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
         RunTest("test_receive_empty_packet_is_counted_invalid", TestReceiveEmptyPacketIsCountedInvalid);
         RunTest("test_config_validation", TestConfigValidation);
+        RunTest("test_config_refuses_bad_sequence_buffer_sizes", TestConfigRefusesBadSequenceBufferSizes);
+        RunTest("test_config_refuses_the_c_bounds", TestConfigRefusesTheCBounds);
+        RunTest("test_reassembly_buffer_is_zeroed", TestReassemblyBufferIsZeroed);
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
 
@@ -994,6 +999,85 @@ internal static partial class Tests
 
         Check(context.Sender.GetAcks().Length > 0, "acks accumulate after reset");
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) > 0, "packets received after reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_endpoint_reset_clears_stats: reset zeroes every statistic getter
+
+    private static void TestEndpointResetClearsStats()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < 32; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.Update(time);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+        }
+
+        // stats accumulate before reset
+        Check(context.Sender.Rtt > 0.0f, "rtt accumulates before reset");
+
+        context.Sender.Reset();
+        context.Receiver.Reset();
+
+        Check(context.Sender.Rtt == 0.0f, "rtt cleared by reset");
+        Check(context.Sender.RttMin == 0.0f, "rtt_min cleared by reset");
+        Check(context.Sender.RttMax == 0.0f, "rtt_max cleared by reset");
+        Check(context.Sender.RttAvg == 0.0f, "rtt_avg cleared by reset");
+        Check(context.Sender.JitterAvgVsMinRtt == 0.0f, "jitter_avg cleared by reset");
+        Check(context.Sender.JitterMaxVsMinRtt == 0.0f, "jitter_max cleared by reset");
+        Check(context.Sender.JitterStddevVsAvgRtt == 0.0f, "jitter_stddev cleared by reset");
+        Check(context.Sender.PacketLoss == 0.0f, "packet_loss cleared by reset");
+        Check(context.Sender.SentBandwidthKbps == 0.0f, "sent_kbps cleared by reset");
+        Check(context.Sender.ReceivedBandwidthKbps == 0.0f, "received_kbps cleared by reset");
+        Check(context.Sender.AckedBandwidthKbps == 0.0f, "acked_kbps cleared by reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_min_large: the rtt minimum is decided by a sample count, not a
+    // sentinel, so a minimum of 10000 ms or more is reported instead of 0
+
+    private static void TestRttMinLarge()
+    {
+        double time = 0.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        double[] rttSeconds = { 10.0, 12.0, 20.0 };
+        foreach (double rtt in rttSeconds)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            time += rtt;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+
+            context.Sender.ClearAcks();
+            context.Receiver.ClearAcks();
+        }
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin == 10000.0f, "rtt_min reports 10000 ms when all samples are 10000 ms or more");
     }
 
     // ------------------------------------------------------------

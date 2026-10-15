@@ -843,25 +843,41 @@ public sealed class Endpoint
         if (config.MaxFragments <= 0 || config.MaxFragments > 256) throw new ArgumentException("config.MaxFragments must be in [1,256]", nameof(config));
         if (config.FragmentSize <= 0) throw new ArgumentException("config.FragmentSize must be positive", nameof(config));
         if (config.AckBufferSize <= 0) throw new ArgumentException("config.AckBufferSize must be positive", nameof(config));
-        if (config.SentPacketsBufferSize <= 0) throw new ArgumentException("config.SentPacketsBufferSize must be positive", nameof(config));
-        if (config.ReceivedPacketsBufferSize <= 0) throw new ArgumentException("config.ReceivedPacketsBufferSize must be positive", nameof(config));
-        if (config.FragmentReassemblyBufferSize <= 0) throw new ArgumentException("config.FragmentReassemblyBufferSize must be positive", nameof(config));
+        if (!IsValidSequenceBufferSize(config.SentPacketsBufferSize)) throw new ArgumentException("config.SentPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
+        if (!IsValidSequenceBufferSize(config.ReceivedPacketsBufferSize)) throw new ArgumentException("config.ReceivedPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
+        if (!IsValidSequenceBufferSize(config.FragmentReassemblyBufferSize)) throw new ArgumentException("config.FragmentReassemblyBufferSize must be a power of two no larger than 16384", nameof(config));
         if (config.RttHistorySize <= 0) throw new ArgumentException("config.RttHistorySize must be positive", nameof(config));
         if (config.TransmitPacket == null) throw new ArgumentNullException(nameof(config), "config.TransmitPacket is required");
         if (config.ProcessPacket == null) throw new ArgumentNullException(nameof(config), "config.ProcessPacket is required");
 
+        if (config.FragmentAbove > config.MaxPacketSize) throw new ArgumentException("config.FragmentAbove must not exceed config.MaxPacketSize", nameof(config));
+
         // the C library debug-asserts num_fragments <= max_fragments on the send
         // path; the construction-time equivalent is that the largest fragmentable
-        // packet must fit in MaxFragments fragments
-        if (config.MaxPacketSize > config.FragmentAbove)
+        // packet must fit in MaxFragments fragments. the C applies it always, not
+        // only when MaxPacketSize > FragmentAbove.
+        if (config.MaxFragments <= (config.MaxPacketSize - 1) / config.FragmentSize)
         {
-            long worstCaseFragments = ((long)config.MaxPacketSize + config.FragmentSize - 1) / config.FragmentSize;
-            if (worstCaseFragments > config.MaxFragments)
-            {
-                throw new ArgumentException(
-                    $"config.MaxFragments ({config.MaxFragments}) cannot cover MaxPacketSize ({config.MaxPacketSize}) at FragmentSize ({config.FragmentSize}): worst case is {worstCaseFragments} fragments",
-                    nameof(config));
-            }
+            throw new ArgumentException(
+                $"config.MaxFragments ({config.MaxFragments}) cannot cover MaxPacketSize ({config.MaxPacketSize}) at FragmentSize ({config.FragmentSize})",
+                nameof(config));
+        }
+
+        if ((long)config.MaxFragments * config.FragmentSize > int.MaxValue - Wire.MaxPacketHeaderBytes)
+        {
+            throw new ArgumentException("config.MaxFragments * config.FragmentSize does not fit in a packet length", nameof(config));
+        }
+
+        if (config.MaxPacketSize > int.MaxValue - Wire.MaxPacketHeaderBytes - Wire.FragmentHeaderBytes)
+        {
+            throw new ArgumentException("config.MaxPacketSize is too large for the receive length check", nameof(config));
+        }
+
+        if (config.PacketHeaderSize < 0) throw new ArgumentException("config.PacketHeaderSize must not be negative", nameof(config));
+
+        if ((long)config.PacketHeaderSize + config.MaxPacketSize + Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes > int.MaxValue)
+        {
+            throw new ArgumentException("config.PacketHeaderSize + config.MaxPacketSize does not fit a received packet length", nameof(config));
         }
 
         _name = config.Name;
@@ -903,6 +919,15 @@ public sealed class Endpoint
         Array.Fill(_rttHistoryBuffer, -1.0f);
 
         _reassemblyCleanup = CleanupReassemblySlot;
+    }
+
+    // the three sequence buffers are indexed as `sequence % num_entries` over a
+    // 16-bit sequence space: a size that does not divide 65536 aliases after a
+    // wrap, and a size above half the window rejects sequence 0 on a cold buffer.
+    // a power of two no larger than 16384 satisfies both.
+    private static bool IsValidSequenceBufferSize(int size)
+    {
+        return size >= 1 && size <= 16384 && (size & (size - 1)) == 0;
     }
 
     // reliable_fragment_reassembly_data_cleanup: return the pooled buffer, if any.
@@ -1047,7 +1072,7 @@ public sealed class Endpoint
 
         int packetBytes = packetData.Length;
 
-        if (packetBytes > _maxPacketSize + Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes)
+        if (packetBytes > (long)_maxPacketSize + Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes)
         {
             if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] packet too large to receive. packet is at least {packetBytes - (Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes)} bytes, maximum is {_maxPacketSize}\n");
             _counters[(int)EndpointCounter.NumPacketsTooLargeToReceive]++;
@@ -1219,6 +1244,10 @@ public sealed class Endpoint
                 newReassembly.NumFragmentsReceived = 0;
                 newReassembly.NumFragmentsTotal = numFragments;
                 newReassembly.PacketData = ArrayPool<byte>.Shared.Rent(packetBufferSize);
+                // the pool hands back uninitialized memory: zero the requested length
+                // so a future logic error that skips storing a fragment leaks zeros
+                // into the delivered packet instead of stale bytes
+                Array.Clear(newReassembly.PacketData, 0, packetBufferSize);
                 newReassembly.PacketBytes = 0;
                 newReassembly.PacketHeaderBytes = 0;
                 newReassembly.FragmentReceived.Clear();
@@ -1334,18 +1363,30 @@ public sealed class Endpoint
     }
 
     /// <summary>
-    /// Resets the endpoint to its initial state: acks, counters, sequence number
-    /// and all tracking buffers are cleared, and in-progress fragment
-    /// reassemblies are released. (Like the C library, smoothed stats and the rtt
-    /// history are not cleared.)
+    /// Resets the endpoint to its initial state: acks, counters, sequence number,
+    /// statistics and all tracking buffers are cleared, and in-progress fragment
+    /// reassemblies are released.
     /// </summary>
     public void Reset()
     {
         _numAcks = 0;
         _sequence = 0;
 
+        _rtt = 0.0f;
+        _rttMin = 0.0f;
+        _rttMax = 0.0f;
+        _rttAvg = 0.0f;
+        _jitterAvgVsMinRtt = 0.0f;
+        _jitterMaxVsMinRtt = 0.0f;
+        _jitterStddevVsAvgRtt = 0.0f;
+        _packetLoss = 0.0f;
+        _sentBandwidthKbps = 0.0f;
+        _receivedBandwidthKbps = 0.0f;
+        _ackedBandwidthKbps = 0.0f;
+
         Array.Clear(_acks);
         Array.Clear(_counters);
+        Array.Fill(_rttHistoryBuffer, -1.0f);
 
         for (int i = 0; i < _fragmentReassemblyBufferSize; ++i)
         {
@@ -1370,7 +1411,7 @@ public sealed class Endpoint
 
         // calculate min and max rtt
         {
-            float minRtt = 10000.0f;
+            float minRtt = float.MaxValue;
             float maxRtt = 0.0f;
             float sumRtt = 0.0f;
             int count = 0;
@@ -1391,18 +1432,19 @@ public sealed class Endpoint
                     count++;
                 }
             }
-            if (minRtt == 10000.0f)
-            {
-                minRtt = 0.0f;
-            }
-            _rttMin = minRtt;
-            _rttMax = maxRtt;
+            // the sample count, not the value of min_rtt, says whether the history
+            // is empty: a sentinel compared against a real rtt reports 0 for a link
+            // slow enough to reach it
             if (count > 0)
             {
+                _rttMin = minRtt;
+                _rttMax = maxRtt;
                 _rttAvg = sumRtt / count;
             }
             else
             {
+                _rttMin = 0.0f;
+                _rttMax = 0.0f;
                 _rttAvg = 0.0f;
             }
         }

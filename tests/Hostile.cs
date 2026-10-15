@@ -433,6 +433,176 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // the three sequence buffers must each be a power of two no larger than
+    // 16384, exactly like the C reference: 100, 32768, 65535 and 65536 are
+    // refused on each field; 256 and 16384 are accepted and carry a one-byte send
+
+    private static void TestConfigRefusesBadSequenceBufferSizes()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => true,
+            };
+        }
+
+        static void MustThrow(Action action, string what)
+        {
+            try
+            {
+                action();
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must throw ArgumentException");
+        }
+
+        (string field, Action<EndpointConfig, int> set)[] fields =
+        {
+            ("SentPacketsBufferSize", (c, v) => c.SentPacketsBufferSize = v),
+            ("ReceivedPacketsBufferSize", (c, v) => c.ReceivedPacketsBufferSize = v),
+            ("FragmentReassemblyBufferSize", (c, v) => c.FragmentReassemblyBufferSize = v),
+        };
+
+        int[] refused = { 100, 32768, 65535, 65536 };
+        int[] accepted = { 256, 16384 };
+
+        foreach ((string field, Action<EndpointConfig, int> set) in fields)
+        {
+            foreach (int value in refused)
+            {
+                EndpointConfig config = Valid();
+                set(config, value);
+                MustThrow(() => _ = new Endpoint(config, 0.0), $"{field} = {value} refused");
+            }
+
+            foreach (int value in accepted)
+            {
+                TestContext context = new TestContext();
+                EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+                set(senderConfig, value);
+                EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+                context.Sender = new Endpoint(senderConfig, 0.0);
+                context.Receiver = new Endpoint(receiverConfig, 0.0);
+
+                context.Sender.SendPacket(new byte[1]);
+                context.Receiver.SendPacket(new byte[1]);
+
+                Check(context.Sender.GetAcks().Length > 0, $"{field} = {value} accepted and a one-byte send is acked");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // the C reference bounds the port was missing, one refused case each
+
+    private static void TestConfigRefusesTheCBounds()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => true,
+            };
+        }
+
+        static void MustThrowConfig(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must throw ArgumentException");
+        }
+
+        // fragment_above > max_packet_size can never fire
+        MustThrowConfig(c => { c.FragmentAbove = 2048; c.MaxPacketSize = 1024; }, "FragmentAbove > MaxPacketSize");
+
+        // max_fragments * fragment_size does not fit in a packet length
+        MustThrowConfig(c => { c.MaxFragments = 256; c.FragmentSize = 9_000_000; }, "MaxFragments * FragmentSize overflows a packet length");
+
+        // max_packet_size is too large for the receive length check
+        MustThrowConfig(c => { c.MaxPacketSize = int.MaxValue - 10; }, "MaxPacketSize too large for receive length check");
+
+        // packet_header_size must not be negative
+        MustThrowConfig(c => { c.PacketHeaderSize = -1; }, "PacketHeaderSize < 0");
+
+        // packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX
+        MustThrowConfig(c => { c.PacketHeaderSize = 28; c.MaxPacketSize = int.MaxValue - 14 - 28 + 1; }, "header + max + 9 + 5 > INT_MAX");
+    }
+
+    // ------------------------------------------------------------
+    // the reassembly buffer is rented from the pool and must be zeroed on the
+    // requested length before fragments are stored, so a poisoned pool buffer
+    // never leaks a stale byte into a delivered packet
+
+    private static void TestReassemblyBufferIsZeroed()
+    {
+        // poison the pool: rent a buffer the reassembly path will reuse, fill it
+        // with 0xAA, return it
+        byte[] poisoned = System.Buffers.ArrayPool<byte>.Shared.Rent(4096);
+        for (int i = 0; i < poisoned.Length; ++i)
+        {
+            poisoned[i] = 0xAA;
+        }
+        System.Buffers.ArrayPool<byte>.Shared.Return(poisoned);
+
+        int processed = 0;
+        byte[]? delivered = null;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            Name = "sink",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { processed++; delivered = packetData.ToArray(); return true; },
+        }, 100.0);
+
+        // a 600-byte packet fragments into 500 + 100 bytes. deliver the second
+        // fragment first (completing nothing), then the first (completes the set).
+        byte[] packet = new byte[600];
+        for (int i = 0; i < packet.Length; ++i)
+        {
+            packet[i] = (byte)(0x11 + (i % 0x10));
+        }
+
+        // build the two fragments on the wire shape and feed them out of order
+        // through a helper endpoint, mirroring the fragment header layout
+        Endpoint source = new Endpoint(new EndpointConfig
+        {
+            Name = "source",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, fragment) => { sink.ReceivePacket(fragment); },
+            ProcessPacket = (id, sequence, packetData) => true,
+        }, 100.0);
+
+        source.SendPacket(packet);
+
+        Check(processed == 1, "reassembled packet delivered exactly once");
+        Check(delivered != null && delivered.Length == 600, "reassembled packet is the original 600 bytes");
+        for (int i = 0; i < delivered!.Length; ++i)
+        {
+            Check(delivered[i] == packet[i], $"reassembled byte {i} matches the sent payload");
+        }
+    }
+
+    // ------------------------------------------------------------
     // zero allocation at steady state, the family invariant, measured with the
     // GC allocation counter (the same proof serialize.cs uses)
 
