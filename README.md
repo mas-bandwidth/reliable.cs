@@ -119,6 +119,10 @@ connection: a client has one, a server has one per client slot.
 - **Fragmentation amplifies loss by design**: one lost fragment loses the whole
   packet. Callers needing large reliable blocks should build block transfer
   above this rather than sending very large packets.
+- **Unfinished reassemblies are bounded by a byte budget**: `FragmentReassemblyByteBudget`
+  (256 KB by default; `0` = unbounded, the old behaviour) caps the bytes held by
+  in-progress reassemblies. A first fragment whose buffer would push the total
+  past the budget is refused and counted `NumFragmentsInvalid`.
 - **Continuous bidirectional exchange is assumed** (~60HZ both ways): acks
   piggyback on outgoing packets, and there are no keepalives because there are
   never lulls. The rtt/jitter/loss stats are fresh under the same assumption.
