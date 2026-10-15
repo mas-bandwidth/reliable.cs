@@ -75,6 +75,7 @@ internal static partial class Tests
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
+        RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
         RunTest("test_endpoint_reset", TestEndpointReset);
         RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
@@ -880,6 +881,43 @@ internal static partial class Tests
         // allocator proving eviction frees), and reset must not double-return
         Check(context.Receiver.OutstandingReassemblyBuffers == 0, "evicted reassembly buffer returned");
         context.Receiver.Reset();
+        Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_unfinished_reassembly_respects_byte_budget
+
+    private static void TestUnfinishedReassemblyRespectsByteBudget()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentReassemblyByteBudget = 64 * 1024;
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        const int numFragments = 16;
+        int slotBytes = Wire.MaxPacketHeaderBytes + numFragments * receiverConfig.FragmentSize + 8;
+        int byteBudget = 64 * 1024;
+
+        // 64 last fragments for sequences 0..63, each claiming 16 fragments, with
+        // fragment 0 never arriving. every one is a first fragment for its packet
+        // and would allocate a full slot.
+        for (int sequence = 0; sequence < 64; ++sequence)
+        {
+            byte[] fragment = BuildFragment((ushort)sequence, numFragments - 1, numFragments, 1024, 0, 0);
+            context.Receiver.ReceivePacket(fragment);
+            Check(context.Receiver.OutstandingReassemblyBytes <= byteBudget + slotBytes,
+                $"outstanding reassembly bytes {context.Receiver.OutstandingReassemblyBytes} exceed budget + slot after sequence {sequence}");
+        }
+
+        Check(context.Receiver.OutstandingReassemblyBytes >= slotBytes, "the endpoint allocated at least one slot's worth of bytes");
+
+        context.Receiver.Reset();
+        Check(context.Receiver.OutstandingReassemblyBytes == 0, "outstanding reassembly bytes return to zero after reset");
         Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
     }
 

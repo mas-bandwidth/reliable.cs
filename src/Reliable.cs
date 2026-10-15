@@ -181,6 +181,14 @@ public sealed class EndpointConfig
     /// <summary>Number of packets that can be under reassembly from fragments at the same time.</summary>
     public int FragmentReassemblyBufferSize = 64;
 
+    /// <summary>
+    /// Byte budget for unfinished fragment reassemblies. Before a first fragment
+    /// allocates, the receive path totals the bytes held by live reassemblies and
+    /// refuses a fragment whose buffer would push the total past the budget. 0 =
+    /// unbounded (the old behaviour).
+    /// </summary>
+    public int FragmentReassemblyByteBudget = 256 * 1024;
+
     /// <summary>Exponential smoothing factor for the rtt moving average.</summary>
     public float RttSmoothingFactor = 0.0025f;
 
@@ -774,6 +782,7 @@ public sealed class Endpoint
         public int NumFragmentsReceived;
         public int NumFragmentsTotal;
         public byte[]? PacketData;      // rented from ArrayPool; null = no reassembly in this slot
+        public int PacketBufferSize;    // the requested buffer size, for the byte budget
         public int PacketBytes;
         public int PacketHeaderBytes;
         public FragmentReceivedBits FragmentReceived;
@@ -824,6 +833,25 @@ public sealed class Endpoint
     // observability hook for tests, mirroring the C suite's tracking allocator:
     // rented reassembly buffers not yet returned. must be zero when idle.
     internal int OutstandingReassemblyBuffers;
+
+    // the bytes those live reassemblies claim against the byte budget, derived
+    // from the live entries (mirrors reliable_endpoint_unfinished_reassembly_bytes).
+    internal int OutstandingReassemblyBytes
+    {
+        get
+        {
+            long total = 0;
+            for (int i = 0; i < _fragmentReassemblyBufferSize; ++i)
+            {
+                ref FragmentReassemblyData reassembly = ref _fragmentReassembly.EntryAt(i);
+                if (reassembly.PacketData != null)
+                {
+                    total += reassembly.PacketBufferSize;
+                }
+            }
+            return (int)total;
+        }
+    }
 
     /// <summary>
     /// Creates an endpoint. The configuration is validated here — the C library's
@@ -939,6 +967,7 @@ public sealed class Endpoint
         {
             ArrayPool<byte>.Shared.Return(reassembly.PacketData);
             reassembly.PacketData = null;
+            reassembly.PacketBufferSize = 0;
             OutstandingReassemblyBuffers--;
         }
     }
@@ -1238,7 +1267,7 @@ public sealed class Endpoint
                     return;
                 }
 
-                int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * _fragmentSize;
+                int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * _fragmentSize + 8;
 
                 ref FragmentReassemblyData newReassembly = ref _fragmentReassembly.EntryAt(reassemblyIndex);
                 newReassembly.NumFragmentsReceived = 0;
@@ -1248,6 +1277,7 @@ public sealed class Endpoint
                 // so a future logic error that skips storing a fragment leaks zeros
                 // into the delivered packet instead of stale bytes
                 Array.Clear(newReassembly.PacketData, 0, packetBufferSize);
+                newReassembly.PacketBufferSize = packetBufferSize;
                 newReassembly.PacketBytes = 0;
                 newReassembly.PacketHeaderBytes = 0;
                 newReassembly.FragmentReceived.Clear();
