@@ -1551,7 +1551,7 @@ public sealed class Endpoint
         // calculate sent bandwidth
         {
             uint baseSequence = unchecked((uint)(_sentPackets.Sequence - _sentPacketsBufferSize + 1 + 0xFFFF));
-            int bytesSent = 0;
+            long bytesSent = 0;
             double startTime = double.MaxValue;
             double finishTime = 0.0;
             int numSamples = _sentPacketsBufferSize / 2;
@@ -1564,7 +1564,7 @@ public sealed class Endpoint
                     continue;
                 }
                 ref SentPacketData sentPacketData = ref _sentPackets.EntryAt(sentPacketIndex);
-                bytesSent += (int)sentPacketData.PacketBytes;
+                bytesSent += sentPacketData.PacketBytes;
                 if (sentPacketData.Time < startTime)
                 {
                     startTime = sentPacketData.Time;
@@ -1591,7 +1591,7 @@ public sealed class Endpoint
         // calculate received bandwidth
         {
             uint baseSequence = unchecked((uint)(_receivedPackets.Sequence - _receivedPacketsBufferSize + 1 + 0xFFFF));
-            int bytesReceived = 0;
+            long bytesReceived = 0;
             double startTime = double.MaxValue;
             double finishTime = 0.0;
             int numSamples = _receivedPacketsBufferSize / 2;
@@ -1604,7 +1604,7 @@ public sealed class Endpoint
                     continue;
                 }
                 ref ReceivedPacketData receivedPacketData = ref _receivedPackets.EntryAt(receivedPacketIndex);
-                bytesReceived += (int)receivedPacketData.PacketBytes;
+                bytesReceived += receivedPacketData.PacketBytes;
                 if (receivedPacketData.Time < startTime)
                 {
                     startTime = receivedPacketData.Time;
@@ -1631,7 +1631,7 @@ public sealed class Endpoint
         // calculate acked bandwidth
         {
             uint baseSequence = unchecked((uint)(_sentPackets.Sequence - _sentPacketsBufferSize + 1 + 0xFFFF));
-            int bytesSent = 0;
+            long bytesSent = 0;
             double startTime = double.MaxValue;
             double finishTime = 0.0;
             int numSamples = _sentPacketsBufferSize / 2;
@@ -1648,7 +1648,7 @@ public sealed class Endpoint
                 {
                     continue;
                 }
-                bytesSent += (int)sentPacketData.PacketBytes;
+                bytesSent += sentPacketData.PacketBytes;
                 if (sentPacketData.Time < startTime)
                 {
                     startTime = sentPacketData.Time;
