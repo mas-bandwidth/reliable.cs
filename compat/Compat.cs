@@ -1013,6 +1013,101 @@ internal static class Program
         PrintHardeningLine("fresh", s_hwSender!);
     }
 
+    // ------------------------------------------------------------
+    // byte_budget mode
+    //
+    // Differential pins for the unfinished-reassembly byte budget. A first
+    // fragment that would push the live reassembly bytes past the configured
+    // budget is refused (counted NUM_FRAGMENTS_INVALID); 0 = unbounded. Each
+    // crafted fragment prints one line: step, refused|accepted, the outstanding
+    // reassembly bytes, then the eleven counters. byte for byte identical to
+    // compat.c.
+
+    private static Endpoint BbEndpoint(int budget)
+    {
+        return new Endpoint(new EndpointConfig
+        {
+            Name = "byte_budget",
+            MaxPacketSize = 16384,
+            FragmentAbove = 500,
+            FragmentSize = 1024,
+            MaxFragments = 16,
+            FragmentReassemblyByteBudget = budget,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => true,
+        }, 100.0);
+    }
+
+    // a fragment: prefix 1, sequence LE, fragment id, count-1, then 0x5A payload.
+    // fragment 0 embeds the canonical packet header, exactly like the sender.
+    private static int BbBuildFragment(byte[] buffer, ushort sequence, int fragmentId, int numFragments, int payloadBytes)
+    {
+        int p = 0;
+        buffer[p++] = 1;
+        buffer[p++] = (byte)(sequence & 0xFF);
+        buffer[p++] = (byte)(sequence >> 8);
+        buffer[p++] = (byte)fragmentId;
+        buffer[p++] = (byte)(numFragments - 1);
+        if (fragmentId == 0)
+            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, 0xFFFF, 0);
+        for (int i = 0; i < payloadBytes; i++)
+            buffer[p++] = 0x5A;
+        return p;
+    }
+
+    private static void BbReport(string step, bool refused, Endpoint endpoint)
+    {
+        StringBuilder sb = new StringBuilder(160);
+        sb.Append(step).Append(' ').Append(refused ? "refused" : "accepted").Append(' ').Append(endpoint.OutstandingReassemblyBytes);
+        ReadOnlySpan<ulong> counters = endpoint.Counters;
+        for (int i = 0; i < counters.Length; i++)
+            sb.Append(' ').Append(counters[i]);
+        sb.Append('\n');
+        s_out.Write(sb.ToString());
+    }
+
+    private static void BbRunBudget(int budget, string label)
+    {
+        Endpoint endpoint = BbEndpoint(budget);
+        byte[] fragment = new byte[2048];
+
+        for (int seq = 0; seq < 64; seq++)
+        {
+            int fragmentBytes = BbBuildFragment(fragment, (ushort)seq, 15, 16, 1024);
+            ulong invalidBefore = endpoint.Counters[9];
+            endpoint.ReceivePacket(fragment.AsSpan(0, fragmentBytes));
+            BbReport(label + "-" + seq, endpoint.Counters[9] != invalidBefore, endpoint);
+        }
+
+        byte[] genuine = new byte[16];
+        int h = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
+        genuine[h] = 0;
+        endpoint.ReceivePacket(genuine.AsSpan(0, h + 1));
+        BbReport(label + "-genuine", false, endpoint);
+    }
+
+    private static void RunByteBudget()
+    {
+        // 64 crafted last fragments at 64 KB, then the same unbounded (0)
+        BbRunBudget(64 * 1024, "b64k");
+        BbRunBudget(0, "b0");
+
+        // a complete fragmented packet (1024 + 512 = 1.5 x fragment_size) within the budget
+        {
+            Endpoint endpoint = BbEndpoint(64 * 1024);
+            byte[] fragment = new byte[2048];
+
+            int n0 = BbBuildFragment(fragment, 0, 0, 2, 1024);
+            ulong invalidBefore = endpoint.Counters[9];
+            endpoint.ReceivePacket(fragment.AsSpan(0, n0));
+            BbReport("complete-0", endpoint.Counters[9] != invalidBefore, endpoint);
+
+            int n1 = BbBuildFragment(fragment, 0, 1, 2, 512);
+            endpoint.ReceivePacket(fragment.AsSpan(0, n1));
+            BbReport("complete-1", false, endpoint);
+        }
+    }
+
     private static int Main(string[] args)
     {
         // buffer stdout: the scenario traces are hundreds of thousands of lines
@@ -1053,13 +1148,18 @@ internal static class Program
             RunHardening();
             result = 0;
         }
+        else if (args.Length >= 1 && args[0] == "byte_budget")
+        {
+            RunByteBudget();
+            result = 0;
+        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat empty_packet | Compat config_refusal | Compat hardening | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat fragment_window | Compat empty_packet | Compat config_refusal | Compat hardening | Compat byte_budget | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 

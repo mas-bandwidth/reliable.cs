@@ -82,6 +82,7 @@ gate "malformed inputs"                malformed
 gate "fragment window"                 fragment_window
 gate "config refusal"                  config_refusal
 gate "1.4.x hardening"                 hardening
+gate "reassembly byte budget"          byte_budget
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500
