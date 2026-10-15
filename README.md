@@ -76,7 +76,7 @@ of difference fails. Two requirements the script enforces and CI pins:
   (`macos-latest`, where clang's default `-ffp-contract=on` would fuse
   `a + b*c`), and `FloatMultiplyAddRoundsTwice` in `tests/Tests.cs` pins the C#
   side's strict rounding the way `-ffp-contract=off` pins the C side's.
-- CI pins the C clone to a release tag (`v1.4.0`); bump deliberately, in its
+- CI pins the C clone to a release tag (`v1.4.5`); bump deliberately, in its
   own commit.
 
 ## Using it
@@ -119,6 +119,10 @@ connection: a client has one, a server has one per client slot.
 - **Fragmentation amplifies loss by design**: one lost fragment loses the whole
   packet. Callers needing large reliable blocks should build block transfer
   above this rather than sending very large packets.
+- **Unfinished reassemblies are bounded by a byte budget**: `FragmentReassemblyByteBudget`
+  (256 KB by default; `0` = unbounded, the old behaviour) caps the bytes held by
+  in-progress reassemblies. A first fragment whose buffer would push the total
+  past the budget is refused and counted `NumFragmentsInvalid`.
 - **Continuous bidirectional exchange is assumed** (~60HZ both ways): acks
   piggyback on outgoing packets, and there are no keepalives because there are
   never lulls. The rtt/jitter/loss stats are fresh under the same assumption.

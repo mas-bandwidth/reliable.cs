@@ -181,6 +181,14 @@ public sealed class EndpointConfig
     /// <summary>Number of packets that can be under reassembly from fragments at the same time.</summary>
     public int FragmentReassemblyBufferSize = 64;
 
+    /// <summary>
+    /// Byte budget for unfinished fragment reassemblies. Before a first fragment
+    /// allocates, the receive path totals the bytes held by live reassemblies and
+    /// refuses a fragment whose buffer would push the total past the budget. 0 =
+    /// unbounded (the old behaviour).
+    /// </summary>
+    public int FragmentReassemblyByteBudget = 256 * 1024;
+
     /// <summary>Exponential smoothing factor for the rtt moving average.</summary>
     public float RttSmoothingFactor = 0.0025f;
 
@@ -774,6 +782,7 @@ public sealed class Endpoint
         public int NumFragmentsReceived;
         public int NumFragmentsTotal;
         public byte[]? PacketData;      // rented from ArrayPool; null = no reassembly in this slot
+        public int PacketBufferSize;    // the requested buffer size, for the byte budget
         public int PacketBytes;
         public int PacketHeaderBytes;
         public FragmentReceivedBits FragmentReceived;
@@ -790,6 +799,7 @@ public sealed class Endpoint
     private readonly int _sentPacketsBufferSize;
     private readonly int _receivedPacketsBufferSize;
     private readonly int _fragmentReassemblyBufferSize;
+    private readonly int _fragmentReassemblyByteBudget;
     private readonly float _rttSmoothingFactor;
     private readonly int _rttHistorySize;
     private readonly float _packetLossSmoothingFactor;
@@ -825,6 +835,25 @@ public sealed class Endpoint
     // rented reassembly buffers not yet returned. must be zero when idle.
     internal int OutstandingReassemblyBuffers;
 
+    // the bytes those live reassemblies claim against the byte budget, derived
+    // from the live entries (mirrors reliable_endpoint_unfinished_reassembly_bytes).
+    internal int OutstandingReassemblyBytes
+    {
+        get
+        {
+            long total = 0;
+            for (int i = 0; i < _fragmentReassemblyBufferSize; ++i)
+            {
+                ref FragmentReassemblyData reassembly = ref _fragmentReassembly.EntryAt(i);
+                if (reassembly.PacketData != null)
+                {
+                    total += reassembly.PacketBufferSize;
+                }
+            }
+            return (int)total;
+        }
+    }
+
     /// <summary>
     /// Creates an endpoint. The configuration is validated here — the C library's
     /// debug-only asserts are construction-time exceptions in C# — and copied, so
@@ -846,6 +875,7 @@ public sealed class Endpoint
         if (!IsValidSequenceBufferSize(config.SentPacketsBufferSize)) throw new ArgumentException("config.SentPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
         if (!IsValidSequenceBufferSize(config.ReceivedPacketsBufferSize)) throw new ArgumentException("config.ReceivedPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
         if (!IsValidSequenceBufferSize(config.FragmentReassemblyBufferSize)) throw new ArgumentException("config.FragmentReassemblyBufferSize must be a power of two no larger than 16384", nameof(config));
+        if (config.FragmentReassemblyByteBudget < 0) throw new ArgumentException("config.FragmentReassemblyByteBudget must not be negative", nameof(config));
         if (config.RttHistorySize <= 0) throw new ArgumentException("config.RttHistorySize must be positive", nameof(config));
         if (config.TransmitPacket == null) throw new ArgumentNullException(nameof(config), "config.TransmitPacket is required");
         if (config.ProcessPacket == null) throw new ArgumentNullException(nameof(config), "config.ProcessPacket is required");
@@ -890,6 +920,7 @@ public sealed class Endpoint
         _sentPacketsBufferSize = config.SentPacketsBufferSize;
         _receivedPacketsBufferSize = config.ReceivedPacketsBufferSize;
         _fragmentReassemblyBufferSize = config.FragmentReassemblyBufferSize;
+        _fragmentReassemblyByteBudget = config.FragmentReassemblyByteBudget;
         _rttSmoothingFactor = config.RttSmoothingFactor;
         _rttHistorySize = config.RttHistorySize;
         _packetLossSmoothingFactor = config.PacketLossSmoothingFactor;
@@ -939,6 +970,7 @@ public sealed class Endpoint
         {
             ArrayPool<byte>.Shared.Return(reassembly.PacketData);
             reassembly.PacketData = null;
+            reassembly.PacketBufferSize = 0;
             OutstandingReassemblyBuffers--;
         }
     }
@@ -1238,19 +1270,40 @@ public sealed class Endpoint
                     return;
                 }
 
-                int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * _fragmentSize;
+                int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * _fragmentSize + 8;
 
                 ref FragmentReassemblyData newReassembly = ref _fragmentReassembly.EntryAt(reassemblyIndex);
                 newReassembly.NumFragmentsReceived = 0;
                 newReassembly.NumFragmentsTotal = numFragments;
+                newReassembly.PacketData = null;
+                newReassembly.PacketBufferSize = 0;
+                newReassembly.PacketBytes = 0;
+                newReassembly.PacketHeaderBytes = 0;
+                newReassembly.FragmentReceived.Clear();
+
+                // a first fragment whose buffer would push unfinished reassemblies past the configured
+                // byte budget is refused. 0 means unbounded, the behaviour without the option.
+                // checked before the rent so a refusal does not hold a buffer, and so this entry
+                // is not counted in OutstandingReassemblyBytes (that sum skips a null PacketData).
+                if (_fragmentReassemblyByteBudget > 0)
+                {
+                    long unfinishedBytes = OutstandingReassemblyBytes;
+
+                    if (unfinishedBytes + packetBufferSize > _fragmentReassemblyByteBudget)
+                    {
+                        if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring fragment {fragmentId} of packet {sequence}. reassembly byte budget exceeded\n");
+                        _fragmentReassembly.RemoveWithCleanup(sequence, _reassemblyCleanup);
+                        _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
+                        return;
+                    }
+                }
+
                 newReassembly.PacketData = ArrayPool<byte>.Shared.Rent(packetBufferSize);
                 // the pool hands back uninitialized memory: zero the requested length
                 // so a future logic error that skips storing a fragment leaks zeros
                 // into the delivered packet instead of stale bytes
                 Array.Clear(newReassembly.PacketData, 0, packetBufferSize);
-                newReassembly.PacketBytes = 0;
-                newReassembly.PacketHeaderBytes = 0;
-                newReassembly.FragmentReceived.Clear();
+                newReassembly.PacketBufferSize = packetBufferSize;
                 OutstandingReassemblyBuffers++;
             }
 

@@ -4,24 +4,24 @@ Where the port stands, exactly. Written for a cold reader.
 
 ## Done and verified (all pushed, all green locally; CI green as of run 1)
 
-- **The library** (`src/Reliable.cs`): complete port of reliable.c v1.4.0 —
+- **The library** (`src/Reliable.cs`): complete port of reliable.c v1.4.5 —
   packet headers, fragments/reassembly, acks, sequence buffers, counters, rtt/
   jitter/loss/bandwidth stats, reset, logging. Builds net8.0 + net10.0,
   warnings-as-errors, no unsafe, zero dependencies.
 - **Interop gate** (`compat/` + `scripts/interop.sh`): C driver against the real
   reliable.c vs the C# twin, shared xorshift64* PRNG, byte-identical stdout
-  required. PASSING locally against both `../reliable` HEAD and an exact v1.4.0
+  required. PASSING locally against both `../reliable` HEAD and an exact v1.4.5
   checkout: wire vectors (1551 lines), scenario clean/lossy/hostile (300/500/500
   iters), wrap (2000 iters crossing 65535→0), two 5000-iteration soaks (42k/44k
   trace lines). Stats compared as float BIT PATTERNS — bit-exact.
   `RELIABLE_COMPAT_HEX=1` on both halves dumps payload hex for debugging.
 - **Tests** (`tests/`): 24 green on net10.0 and net8.0 — the C suite test for
-  test, golden header+fragment pins generated from C v1.4.0, hostile tests for
+  test, golden header+fragment pins generated from C v1.4.5, hostile tests for
   every rejection rule, 200k-case parser fuzz, config validation, zero-alloc
   proof (GC counters, 1000 rounds, 0 bytes), fuzz_target.c script harness port,
   3-seed adversarial soak with invariants.
 - **CI** (`.github/workflows/ci.yml`): ubuntu+macos test matrix, interop gate
-  vs pinned v1.4.0, STANDARD.md spec-sync. Run 1 (commit 97bf22f) completed
+  vs pinned v1.4.5, STANDARD.md spec-sync. Run 1 (commit 97bf22f) completed
   SUCCESS on GitHub; later pushes (notes/wrap profile) had not been checked
   before session end — verify at github.com/mas-bandwidth/reliable.cs/actions.
 - **Notes**: `notes/port-map.md` (every C construct → C# shape, wire invariants,

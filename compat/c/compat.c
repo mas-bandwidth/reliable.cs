@@ -1234,6 +1234,181 @@ static void run_hardening( void )
 }
 
 /* ---------------------------------------------------------------- */
+/* byte_budget mode                                                 */
+/*
+    Differential pins for the unfinished-reassembly byte budget. A first
+    fragment that would push the live reassembly bytes past the configured
+    budget is refused (counted NUM_FRAGMENTS_INVALID); 0 = unbounded. The
+    endpoint's allocator is replaced with a counting allocator, so the harness
+    can report the reassembly bytes it holds (outstanding minus the create-time
+    baseline). Each crafted fragment prints one line: step, refused|accepted,
+    the outstanding reassembly bytes, then the eleven counters. byte for byte
+    identical to Compat.cs.
+*/
+
+#define BB_MAX_ALLOCATIONS 4096
+
+struct bb_alloc_t
+{
+    void * pointers[BB_MAX_ALLOCATIONS];
+    size_t bytes[BB_MAX_ALLOCATIONS];
+    size_t outstanding;
+};
+
+static void * bb_allocate( void * context, size_t bytes )
+{
+    struct bb_alloc_t * bb = (struct bb_alloc_t*) context;
+    void * allocation = malloc( bytes );
+    if ( !allocation )
+        return NULL;
+    int i;
+    for ( i = 0; i < BB_MAX_ALLOCATIONS; ++i )
+        if ( bb->pointers[i] == NULL )
+            break;
+    if ( i >= BB_MAX_ALLOCATIONS )
+        abort();
+    bb->pointers[i] = allocation;
+    bb->bytes[i] = bytes;
+    bb->outstanding += bytes;
+    return allocation;
+}
+
+static void bb_free( void * context, void * pointer )
+{
+    struct bb_alloc_t * bb = (struct bb_alloc_t*) context;
+    int i;
+    for ( i = 0; i < BB_MAX_ALLOCATIONS; ++i )
+        if ( bb->pointers[i] == pointer )
+            break;
+    if ( i >= BB_MAX_ALLOCATIONS )
+        abort();
+    bb->outstanding -= bb->bytes[i];
+    bb->pointers[i] = NULL;
+    bb->bytes[i] = 0;
+    free( pointer );
+}
+
+static void bb_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static int bb_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static struct bb_alloc_t bb_alloc_state;
+
+static struct reliable_endpoint_t * bb_endpoint( int budget )
+{
+    struct reliable_config_t config;
+    reliable_default_config( &config );
+    reliable_copy_string( config.name, "byte_budget", sizeof( config.name ) );
+    config.max_packet_size = 16384;
+    config.fragment_above = 500;
+    config.fragment_size = 1024;
+    config.max_fragments = 16;
+    config.fragment_reassembly_byte_budget = budget;
+    config.allocator_context = &bb_alloc_state;
+    config.allocate_function = bb_allocate;
+    config.free_function = bb_free;
+    config.transmit_packet_function = bb_transmit;
+    config.process_packet_function = bb_process;
+    return reliable_endpoint_create( &config, 100.0 );
+}
+
+/* a fragment: prefix 1, sequence LE, fragment id, count-1, then 0x5A payload.
+   fragment 0 embeds the canonical packet header, exactly like the sender. */
+static int bb_build_fragment( uint8_t * buffer, uint16_t sequence, int fragment_id, int num_fragments, int payload_bytes )
+{
+    int p = 0;
+    buffer[p++] = 1;
+    buffer[p++] = (uint8_t) ( sequence & 0xFF );
+    buffer[p++] = (uint8_t) ( sequence >> 8 );
+    buffer[p++] = (uint8_t) fragment_id;
+    buffer[p++] = (uint8_t) ( num_fragments - 1 );
+    if ( fragment_id == 0 )
+        p += reliable_write_packet_header( buffer + p, sequence, 0xFFFF, 0 );
+    int i;
+    for ( i = 0; i < payload_bytes; i++ )
+        buffer[p++] = 0x5A;
+    return p;
+}
+
+static void bb_report( const char * step, int refused, struct reliable_endpoint_t * endpoint, size_t baseline )
+{
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    printf( "%s %s %lu", step, refused ? "refused" : "accepted",
+        (unsigned long) ( bb_alloc_state.outstanding - baseline ) );
+    int i;
+    for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
+}
+
+static void bb_run_budget( int budget, const char * label )
+{
+    memset( &bb_alloc_state, 0, sizeof( bb_alloc_state ) );
+    struct reliable_endpoint_t * endpoint = bb_endpoint( budget );
+    size_t baseline = bb_alloc_state.outstanding;
+
+    uint8_t fragment[2048];
+
+    int seq;
+    for ( seq = 0; seq < 64; seq++ )
+    {
+        int fragment_bytes = bb_build_fragment( fragment, (uint16_t) seq, 15, 16, 1024 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+        uint64_t invalid_before = counters[9];
+        reliable_endpoint_receive_packet( endpoint, fragment, fragment_bytes );
+        char step[16];
+        snprintf( step, sizeof( step ), "%s-%d", label, seq );
+        bb_report( step, counters[9] != invalid_before, endpoint, baseline );
+    }
+
+    uint8_t genuine[16];
+    int h = reliable_write_packet_header( genuine, 0, 0xFFFF, 0 );
+    genuine[h] = 0;
+    reliable_endpoint_receive_packet( endpoint, genuine, h + 1 );
+    char step[16];
+    snprintf( step, sizeof( step ), "%s-genuine", label );
+    bb_report( step, 0, endpoint, baseline );
+
+    reliable_endpoint_destroy( endpoint );
+}
+
+static void run_byte_budget( void )
+{
+    /* 64 crafted last fragments at 64 KB, then the same unbounded (0) */
+    bb_run_budget( 64 * 1024, "b64k" );
+    bb_run_budget( 0, "b0" );
+
+    /* a complete fragmented packet (1024 + 512 = 1.5 x fragment_size) within the budget */
+    {
+        memset( &bb_alloc_state, 0, sizeof( bb_alloc_state ) );
+        struct reliable_endpoint_t * endpoint = bb_endpoint( 64 * 1024 );
+        size_t baseline = bb_alloc_state.outstanding;
+
+        uint8_t fragment[2048];
+
+        int n0 = bb_build_fragment( fragment, 0, 0, 2, 1024 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+        uint64_t invalid_before = counters[9];
+        reliable_endpoint_receive_packet( endpoint, fragment, n0 );
+        bb_report( "complete-0", counters[9] != invalid_before, endpoint, baseline );
+
+        int n1 = bb_build_fragment( fragment, 0, 1, 2, 512 );
+        reliable_endpoint_receive_packet( endpoint, fragment, n1 );
+        bb_report( "complete-1", 0, endpoint, baseline );
+
+        reliable_endpoint_destroy( endpoint );
+    }
+}
+
+
+/* ---------------------------------------------------------------- */
 
 int main( int argc, char ** argv )
 {
@@ -1267,13 +1442,17 @@ int main( int argc, char ** argv )
     {
         run_hardening();
     }
+    else if ( argc >= 2 && strcmp( argv[1], "byte_budget" ) == 0 )
+    {
+        run_byte_budget();
+    }
     else if ( argc >= 5 && strcmp( argv[1], "scenario" ) == 0 )
     {
         run_scenario( argv[2], strtoull( argv[3], NULL, 10 ), atoi( argv[4] ) );
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat malformed | compat fragment_window | compat empty_packet | compat config_refusal | compat hardening | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat malformed | compat fragment_window | compat empty_packet | compat config_refusal | compat hardening | compat byte_budget | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 
