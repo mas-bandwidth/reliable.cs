@@ -341,6 +341,24 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // an empty datagram is hostile input: counted invalid and dropped, never thrown
+
+    private static void TestReceiveEmptyPacketIsCountedInvalid()
+    {
+        int processed = 0;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { processed++; return true; },
+        }, 0.0);
+
+        sink.ReceivePacket(ReadOnlySpan<byte>.Empty);
+
+        Check(processed == 0, "empty packet does not call the process callback");
+        Check(sink.GetCounter(EndpointCounter.NumPacketsInvalid) == 1, "empty packet counted invalid");
+    }
+
+    // ------------------------------------------------------------
     // API misuse: configuration is validated at construction; wire data never throws
 
     private static void TestConfigValidation()
@@ -397,10 +415,16 @@ internal static partial class Tests
         // the largest fragmentable packet must fit in MaxFragments fragments
         MustThrowConfig(c => { c.MaxPacketSize = 16 * 1024; c.FragmentAbove = 1024; c.FragmentSize = 1024; c.MaxFragments = 8; }, "MaxFragments cannot cover MaxPacketSize");
 
-        // empty spans are API misuse on both paths (the C library asserts packet_bytes > 0)
-        Endpoint endpoint = new Endpoint(Valid(), 0.0);
+        // an empty send is API misuse (the C library asserts packet_bytes > 0).
+        // an empty receive is hostile input: counted invalid and dropped.
+        int receivedCalls = 0;
+        EndpointConfig receiveConfig = Valid();
+        receiveConfig.ProcessPacket = (id, sequence, packetData) => { receivedCalls++; return true; };
+        Endpoint endpoint = new Endpoint(receiveConfig, 0.0);
         MustThrow(() => endpoint.SendPacket(ReadOnlySpan<byte>.Empty), "SendPacket(empty)");
-        MustThrow(() => endpoint.ReceivePacket(ReadOnlySpan<byte>.Empty), "ReceivePacket(empty)");
+        endpoint.ReceivePacket(ReadOnlySpan<byte>.Empty);
+        Check(receivedCalls == 0, "empty receive does not call the process callback");
+        Check(endpoint.GetCounter(EndpointCounter.NumPacketsInvalid) == 1, "empty receive counted invalid");
 
         // oversized send is NOT misuse: dropped and counted, exactly like C
         endpoint.SendPacket(new byte[17 * 1024]);

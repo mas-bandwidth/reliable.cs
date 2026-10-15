@@ -135,8 +135,9 @@ C# programmer would expect. The differences, all recorded in
   `ArgumentException`s here — validated once, at `new Endpoint(...)`, never
   per packet. That includes the send path's fragment-count assert, checked at
   construction as "MaxFragments must cover MaxPacketSize".
-- Empty payloads throw (the C library asserts `packet_bytes > 0`); oversized
-  payloads are dropped and counted, exactly like C.
+- An empty send throws (the C library asserts `packet_bytes > 0` on send).
+  An empty receive is hostile input: it is counted invalid and dropped, and
+  it does not throw. Oversized payloads are dropped and counted, exactly like C.
 - `ProcessPacket` receives a read-only span (the C callback gets a mutable
   pointer); copy if you need to mutate.
 - No `Dispose`: the endpoint owns no unmanaged resources. `Reset()` matches
