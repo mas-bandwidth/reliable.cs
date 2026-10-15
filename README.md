@@ -76,7 +76,7 @@ of difference fails. Two requirements the script enforces and CI pins:
   (`macos-latest`, where clang's default `-ffp-contract=on` would fuse
   `a + b*c`), and `FloatMultiplyAddRoundsTwice` in `tests/Tests.cs` pins the C#
   side's strict rounding the way `-ffp-contract=off` pins the C side's.
-- CI pins the C clone to a release tag (`v1.4.0`); bump deliberately, in its
+- CI pins the C clone to a release tag (`v1.4.5`); bump deliberately, in its
   own commit.
 
 ## Using it
