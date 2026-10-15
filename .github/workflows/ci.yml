@@ -65,7 +65,7 @@ jobs:
           # bump deliberately, in its own commit. the golden pins in
           # tests/Tests.cs were generated at this same tag.
           repository: mas-bandwidth/reliable
-          ref: v1.4.0
+          ref: v1.4.5
           path: c-reliable
       - uses: actions/setup-dotnet@v6
         with:
