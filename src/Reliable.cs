@@ -1130,7 +1130,7 @@ public sealed class Endpoint
 
             if (packetPayloadBytes > _maxPacketSize)
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] packet too large to receive. packet is at {packetPayloadBytes} bytes, maximum is {_maxPacketSize}\n");
+                if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] packet too large to receive. packet is at {packetPayloadBytes} bytes, maximum is {_maxPacketSize}\n");
                 _counters[(int)EndpointCounter.NumPacketsTooLargeToReceive]++;
                 return;
             }
@@ -1215,7 +1215,7 @@ public sealed class Endpoint
             }
             else
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] process packet failed\n");
+                if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] process packet failed\n");
             }
         }
         else
@@ -1255,7 +1255,7 @@ public sealed class Endpoint
 
                 if (reassemblyIndex < 0)
                 {
-                    if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. could not insert in reassembly buffer (stale)\n");
+                    if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. could not insert in reassembly buffer (stale)\n");
                     _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
                     return;
                 }
@@ -1303,14 +1303,14 @@ public sealed class Endpoint
 
             if (numFragments != reassembly.NumFragmentsTotal)
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. fragment count mismatch. expected {reassembly.NumFragmentsTotal}, got {numFragments}\n");
+                if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. fragment count mismatch. expected {reassembly.NumFragmentsTotal}, got {numFragments}\n");
                 _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
                 return;
             }
 
             if (reassembly.FragmentReceived.Get(fragmentId))
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring fragment {fragmentId} of packet {sequence}. fragment already received\n");
+                if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] ignoring fragment {fragmentId} of packet {sequence}. fragment already received\n");
                 return;
             }
 
