@@ -147,8 +147,8 @@ C# programmer would expect. The differences, all recorded in
   - The three sequence buffers (`SentPacketsBufferSize`,
     `ReceivedPacketsBufferSize`, `FragmentReassemblyBufferSize`) must each be
     a power of two no larger than 16384 (C requires only a positive size).
-  - Unfinished reassemblies are bounded by `FragmentReassemblyByteBudget`
-    (256 KB by default; `0` = unbounded). A first
+  - Unfinished reassemblies can be bounded by `FragmentReassemblyByteBudget`
+    (`0`, the default, is unbounded, as in C). With a budget set, a first
     fragment whose buffer would push the bytes held by in-progress
     reassemblies past the budget is refused and counted `NumFragmentsInvalid`.
   - An empty receive is counted invalid and dropped (C asserts

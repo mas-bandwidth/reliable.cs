@@ -81,6 +81,7 @@ internal static partial class Tests
         RunTest("test_sequence_wrap_arithmetic", TestSequenceWrapArithmetic);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
+        RunTest("test_default_config_holds_every_unfinished_reassembly", TestDefaultConfigHoldsEveryUnfinishedReassembly);
         RunTest("test_rtt", TestRtt);
         RunTest("test_packet_loss_estimator", TestPacketLossEstimator);
         RunTest("test_jitter_estimator", TestJitterEstimator);
@@ -1191,6 +1192,40 @@ internal static partial class Tests
 
         context.Receiver.Reset();
         Check(context.Receiver.OutstandingReassemblyBytes == 0, "outstanding reassembly bytes return to zero after reset");
+        Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
+    }
+
+    // ------------------------------------------------------------
+    // the default config holds every unfinished reassembly the window has room
+    // for, as the C reference does: no byte budget unless one is configured
+
+    private static void TestDefaultConfigHoldsEveryUnfinishedReassembly()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        const int numFragments = 16;
+        int numReassemblies = receiverConfig.FragmentReassemblyBufferSize;
+
+        // the last fragment of each of 64 full-size packets, fragment 0 never arriving
+        for (int sequence = 0; sequence < numReassemblies; ++sequence)
+        {
+            byte[] fragment = BuildFragment((ushort)sequence, numFragments - 1, numFragments, receiverConfig.FragmentSize, 0, 0);
+            context.Receiver.ReceivePacket(fragment);
+        }
+
+        Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0,
+            $"default config refused {context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid)} fragments");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == (ulong)numReassemblies, "every fragment received");
+        Check(context.Receiver.OutstandingReassemblyBuffers == numReassemblies, "every reassembly is held");
+
+        context.Receiver.Reset();
         Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
     }
 

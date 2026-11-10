@@ -201,7 +201,6 @@ internal static class Program
             FragmentAbove = 50,
             FragmentSize = 50,
             MaxFragments = 16,
-            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = (id, sequence, packetData) => { },
             ProcessPacket = MalformedProcess,
         };
@@ -509,7 +508,6 @@ internal static class Program
             FragmentAbove = 500,
             FragmentSize = 500,
             MaxFragments = 16,
-            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = ScenarioTransmit,
             ProcessPacket = ScenarioProcess,
         }, time);
@@ -522,7 +520,6 @@ internal static class Program
             FragmentAbove = 500,
             FragmentSize = 500,
             MaxFragments = 16,
-            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = ScenarioTransmit,
             ProcessPacket = ScenarioProcess,
         }, time);

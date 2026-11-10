@@ -192,9 +192,9 @@ public sealed class EndpointConfig
     /// Byte budget for unfinished fragment reassemblies. Before a first fragment
     /// allocates, the receive path totals the bytes held by live reassemblies and
     /// refuses a fragment whose buffer would push the total past the budget. 0 =
-    /// unbounded (the old behaviour).
+    /// unbounded (the default, and the C library's behaviour).
     /// </summary>
-    public int FragmentReassemblyByteBudget = 256 * 1024;
+    public int FragmentReassemblyByteBudget;
 
     /// <summary>Exponential smoothing factor for the rtt moving average.</summary>
     public float RttSmoothingFactor = 0.0025f;
@@ -832,7 +832,7 @@ public sealed class Endpoint
     internal int OutstandingReassemblyBuffers;
 
     // the bytes those live reassemblies claim against the byte budget, derived
-    // from the live entries (mirrors reliable_endpoint_unfinished_reassembly_bytes).
+    // from the live entries. the C library has no byte budget.
     internal int OutstandingReassemblyBytes
     {
         get
