@@ -80,6 +80,7 @@ internal static partial class Tests
         RunTest("test_endpoint_reset", TestEndpointReset);
         RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
         RunTest("test_rtt_min_large", TestRttMinLarge);
+        RunTest("test_rtt_clamped_when_time_steps_back", TestRttClampedWhenTimeStepsBack);
 
         // golden wire pins, generated from the real C library (v1.4.0; the
         // interop vectors gate shows the pinned v1.4.5 emits the same bytes)
@@ -1118,6 +1119,37 @@ internal static partial class Tests
         context.Sender.Update(time);
 
         Check(context.Sender.RttMin == 10000.0f, "rtt_min reports 10000 ms when all samples are 10000 ms or more");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_clamped_when_time_steps_back: an ack processed after the
+    // caller's clock moved backwards gives an rtt sample of 0, never negative
+
+    private static void TestRttClampedWhenTimeStepsBack()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        context.Sender.SendPacket(dummyPacket);
+
+        time -= 1.0;
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+        context.Receiver.SendPacket(dummyPacket);
+
+        Check(context.Sender.GetAcks().Length == 1, "the packet is acked");
+        Check(context.Sender.Rtt >= 0.0f, "rtt stays non-negative when time steps back");
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin >= 0.0f, "rtt_min stays non-negative when time steps back");
+        Check(context.Sender.RttAvg >= 0.0f, "rtt_avg stays non-negative when time steps back");
     }
 
     // ------------------------------------------------------------
