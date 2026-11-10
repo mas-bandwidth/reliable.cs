@@ -21,8 +21,8 @@
  (
   (item "interop-pins-the-bounds-ahead-of-c" :group "interop" :area "reliable.cs"
    :title "Differential pins for the bounds ahead of the C release"
-   :text "The power-of-two and 16384 sequence-buffer bound, FragmentReassemblyByteBudget, and counting an empty receive invalid are ahead of the pinned C release v1.4.5, so the interop gate feeds only inputs both implementations agree on and the unit tests pin the rest. When a C release carries these bounds, bump the pin in .github/workflows/ci.yml and README.md, add a byte_budget mode to both compat harnesses, feed the zero-length receive in malformed and receive_bounds, and widen the config_refusal value list to every power-of-two boundary."
-   :why "Waits on a C release of mas-bandwidth/reliable that carries the three bounds."
+   :text "The 16384 cap on sequence-buffer sizes, rounding those sizes up to a power of two, and counting an empty receive invalid follow C main but are ahead of the pinned C release v1.4.5, so the interop gate feeds only inputs both implementations agree on and the unit tests pin the rest. FragmentReassemblyByteBudget is off by default, as C has no budget, and the gate runs at that default. When a C release carries these rules, bump the pin in .github/workflows/ci.yml and README.md, feed the zero-length receive in malformed and receive_bounds, and widen the config_refusal value list to sizes that are not powers of two and to 16385."
+   :why "Waits on a C release of mas-bandwidth/reliable that carries these rules."
    :date "2026-11-10"
    :origin "the reliable-cs-port reconcile onto main")
  ))
