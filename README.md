@@ -137,8 +137,8 @@ C# programmer would expect. The differences, all recorded in
   per packet. That includes the send path's fragment-count assert, checked at
   construction as "MaxFragments must cover MaxPacketSize". The C reference's
   other bounds hold too (fragment_above may not exceed max_packet_size;
-  max_fragments * fragment_size and max_packet_size are each checked against
-  INT_MAX).
+  max_fragments * fragment_size, fragment_size and max_packet_size are each
+  checked against INT_MAX).
 - Four bounds go beyond the pinned C release (`v1.4.5`). The
   unit tests pin them; the interop gate feeds only inputs on which both
   implementations agree:
@@ -146,9 +146,10 @@ C# programmer would expect. The differences, all recorded in
     datagram may carry, must fit in an int (C checks the sum without the 14).
   - The three sequence buffers (`SentPacketsBufferSize`,
     `ReceivedPacketsBufferSize`, `FragmentReassemblyBufferSize`) must each be
-    a power of two no larger than 16384 (C requires only a positive size).
-  - Unfinished reassemblies are bounded by `FragmentReassemblyByteBudget`
-    (256 KB by default; `0` = unbounded). A first
+    no larger than 16384, and are rounded up to a power of two, as C main
+    does (the pinned C release requires only a positive size).
+  - Unfinished reassemblies can be bounded by `FragmentReassemblyByteBudget`
+    (`0`, the default, is unbounded, as in C). With a budget set, a first
     fragment whose buffer would push the bytes held by in-progress
     reassemblies past the budget is refused and counted `NumFragmentsInvalid`.
   - An empty receive is counted invalid and dropped (C asserts

@@ -546,9 +546,9 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
-    // the three sequence buffers must each be a power of two no larger than
-    // 16384: 100, 32768, 65535 and 65536 are
-    // refused on each field; 256 and 16384 are accepted and carry a one-byte send
+    // the three sequence buffers must each be in [1,16384], as in C: 0, 16385,
+    // 32768, 65535 and 65536 are refused on each field; 3, 100, 255, 256 and
+    // 16384 are accepted (rounded up to a power of two) and carry a one-byte send
 
     private static void TestConfigRefusesBadSequenceBufferSizes()
     {
@@ -581,8 +581,8 @@ internal static partial class Tests
             ("FragmentReassemblyBufferSize", (c, v) => c.FragmentReassemblyBufferSize = v),
         };
 
-        int[] refused = { 100, 32768, 65535, 65536 };
-        int[] accepted = { 256, 16384 };
+        int[] refused = { 0, 16385, 32768, 65535, 65536 };
+        int[] accepted = { 3, 100, 255, 256, 16384 };
 
         foreach ((string field, Action<EndpointConfig, int> set) in fields)
         {
@@ -647,6 +647,9 @@ internal static partial class Tests
 
         // max_packet_size is too large for the receive length check
         MustThrowConfig(c => { c.MaxPacketSize = int.MaxValue - 10; }, "MaxPacketSize too large for receive length check");
+
+        // fragment_size plus the 5 + 9 header bytes must fit in an int
+        MustThrowConfig(c => { c.MaxFragments = 1; c.FragmentSize = int.MaxValue - 14 + 1; }, "FragmentSize + 14 > INT_MAX");
 
         // packet_header_size must not be negative
         MustThrowConfig(c => { c.PacketHeaderSize = -1; }, "PacketHeaderSize < 0");

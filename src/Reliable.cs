@@ -34,6 +34,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Numerics;
 
 namespace Reliable;
 
@@ -192,9 +193,9 @@ public sealed class EndpointConfig
     /// Byte budget for unfinished fragment reassemblies. Before a first fragment
     /// allocates, the receive path totals the bytes held by live reassemblies and
     /// refuses a fragment whose buffer would push the total past the budget. 0 =
-    /// unbounded (the old behaviour).
+    /// unbounded (the default, and the C library's behaviour).
     /// </summary>
-    public int FragmentReassemblyByteBudget = 256 * 1024;
+    public int FragmentReassemblyByteBudget;
 
     /// <summary>Exponential smoothing factor for the rtt moving average.</summary>
     public float RttSmoothingFactor = 0.0025f;
@@ -263,6 +264,12 @@ internal sealed class SequenceBuffer<T> where T : struct
     internal SequenceBuffer(int numEntries)
     {
         Debug.Assert(numEntries > 0);
+
+        // the slot index is sequence % num_entries over a 16-bit sequence, which stays
+        // continuous across the 65535 -> 0 wrap only when num_entries divides 65536, so
+        // round up to the next power of two (as reliable_sequence_buffer_create does).
+        numEntries = (int)BitOperations.RoundUpToPowerOf2((uint)numEntries);
+
         _entrySequence = new uint[numEntries];
         _entries = new T[numEntries];
         Array.Fill(_entrySequence, EmptySentinel);
@@ -832,13 +839,13 @@ public sealed class Endpoint
     internal int OutstandingReassemblyBuffers;
 
     // the bytes those live reassemblies claim against the byte budget, derived
-    // from the live entries (mirrors reliable_endpoint_unfinished_reassembly_bytes).
+    // from the live entries. the C library has no byte budget.
     internal int OutstandingReassemblyBytes
     {
         get
         {
             long total = 0;
-            for (int i = 0; i < _fragmentReassemblyBufferSize; ++i)
+            for (int i = 0; i < _fragmentReassembly.NumEntries; ++i)
             {
                 ref FragmentReassemblyData reassembly = ref _fragmentReassembly.EntryAt(i);
                 if (reassembly.PacketData != null)
@@ -874,9 +881,9 @@ public sealed class Endpoint
         if (config.MaxFragments <= 0 || config.MaxFragments > 256) throw new ArgumentException("config.MaxFragments must be in [1,256]", nameof(config));
         if (config.FragmentSize <= 0) throw new ArgumentException("config.FragmentSize must be positive", nameof(config));
         if (config.AckBufferSize <= 0) throw new ArgumentException("config.AckBufferSize must be positive", nameof(config));
-        if (!IsValidSequenceBufferSize(config.SentPacketsBufferSize)) throw new ArgumentException("config.SentPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
-        if (!IsValidSequenceBufferSize(config.ReceivedPacketsBufferSize)) throw new ArgumentException("config.ReceivedPacketsBufferSize must be a power of two no larger than 16384", nameof(config));
-        if (!IsValidSequenceBufferSize(config.FragmentReassemblyBufferSize)) throw new ArgumentException("config.FragmentReassemblyBufferSize must be a power of two no larger than 16384", nameof(config));
+        if (!IsValidSequenceBufferSize(config.SentPacketsBufferSize)) throw new ArgumentException("config.SentPacketsBufferSize must be in [1,16384]", nameof(config));
+        if (!IsValidSequenceBufferSize(config.ReceivedPacketsBufferSize)) throw new ArgumentException("config.ReceivedPacketsBufferSize must be in [1,16384]", nameof(config));
+        if (!IsValidSequenceBufferSize(config.FragmentReassemblyBufferSize)) throw new ArgumentException("config.FragmentReassemblyBufferSize must be in [1,16384]", nameof(config));
         if (config.FragmentReassemblyByteBudget < 0) throw new ArgumentException("config.FragmentReassemblyByteBudget must not be negative", nameof(config));
         if (config.RttHistorySize <= 0) throw new ArgumentException("config.RttHistorySize must be positive", nameof(config));
         if (config.TransmitPacket == null) throw new ArgumentNullException(nameof(config), "config.TransmitPacket is required");
@@ -903,6 +910,11 @@ public sealed class Endpoint
         if (config.MaxPacketSize > int.MaxValue - Wire.MaxPacketHeaderBytes - Wire.FragmentHeaderBytes)
         {
             throw new ArgumentException("config.MaxPacketSize is too large for the receive length check", nameof(config));
+        }
+
+        if (config.FragmentSize > int.MaxValue - Wire.FragmentHeaderBytes - Wire.MaxPacketHeaderBytes)
+        {
+            throw new ArgumentException("config.FragmentSize is too large for a fragment buffer", nameof(config));
         }
 
         if (config.PacketHeaderSize < 0) throw new ArgumentException("config.PacketHeaderSize must not be negative", nameof(config));
@@ -955,12 +967,12 @@ public sealed class Endpoint
     }
 
     // the three sequence buffers are indexed as `sequence % num_entries` over a
-    // 16-bit sequence space: a size that does not divide 65536 aliases after a
-    // wrap, and a size above half the window rejects sequence 0 on a cold buffer.
-    // a power of two no larger than 16384 satisfies both.
+    // 16-bit sequence space: a size above half the window rejects sequence 0 on a
+    // cold buffer, so sizes are capped at 16384 (as in C). SequenceBuffer rounds a
+    // size up to a power of two, so it divides 65536 and does not alias at the wrap.
     private static bool IsValidSequenceBufferSize(int size)
     {
-        return size >= 1 && size <= 16384 && (size & (size - 1)) == 0;
+        return size >= 1 && size <= 16384;
     }
 
     // reliable_fragment_reassembly_data_cleanup: return the pooled buffer, if any.
@@ -1323,7 +1335,8 @@ public sealed class Endpoint
 
             if (!StoreFragmentData(ref reassembly, sequence, ack, ackBits, fragmentId, _fragmentSize, packetData.Slice(fragmentHeaderBytes)))
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. could not store fragment data\n");
+                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring fragment {fragmentId} of packet {sequence}. could not store fragment data\n");
+                _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
                 return;
             }
 
@@ -1443,7 +1456,7 @@ public sealed class Endpoint
         Array.Clear(_counters);
         Array.Fill(_rttHistoryBuffer, -1.0f);
 
-        for (int i = 0; i < _fragmentReassemblyBufferSize; ++i)
+        for (int i = 0; i < _fragmentReassembly.NumEntries; ++i)
         {
             if (_fragmentReassembly.OccupiedAtIndex(i))
             {
