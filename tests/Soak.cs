@@ -371,7 +371,7 @@ internal static partial class Tests
         byte[] packetData = new byte[SoakMaxPacketBytes];
         double time = 100.0;
         const double deltaTime = 0.1;
-        const int batch = 128;
+        const int batch = 16;
 
         for (int iteration = 0; iteration < iterations; )
         {
@@ -425,6 +425,11 @@ internal static partial class Tests
             time += deltaTime;
             iteration += chunk;
         }
+
+        Check(clientDelivered.DeliveredCount == iterations,
+            $"client delivered {clientDelivered.DeliveredCount} packets, expected {iterations} (seed {seed})");
+        Check(serverDelivered.DeliveredCount == iterations,
+            $"server delivered {serverDelivered.DeliveredCount} packets, expected {iterations} (seed {seed})");
 
         // on the wrap leg, assert the run actually crossed 16 bit sequence space
         // instead of silently finishing short of the boundary
