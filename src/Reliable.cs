@@ -1335,7 +1335,8 @@ public sealed class Endpoint
 
             if (!StoreFragmentData(ref reassembly, sequence, ack, ackBits, fragmentId, _fragmentSize, packetData.Slice(fragmentHeaderBytes)))
             {
-                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. could not store fragment data\n");
+                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring fragment {fragmentId} of packet {sequence}. could not store fragment data\n");
+                _counters[(int)EndpointCounter.NumFragmentsInvalid]++;
                 return;
             }
 
