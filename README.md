@@ -146,7 +146,8 @@ C# programmer would expect. The differences, all recorded in
     datagram may carry, must fit in an int (C checks the sum without the 14).
   - The three sequence buffers (`SentPacketsBufferSize`,
     `ReceivedPacketsBufferSize`, `FragmentReassemblyBufferSize`) must each be
-    a power of two no larger than 16384 (C requires only a positive size).
+    no larger than 16384, and are rounded up to a power of two, as C main
+    does (the pinned C release requires only a positive size).
   - Unfinished reassemblies can be bounded by `FragmentReassemblyByteBudget`
     (`0`, the default, is unbounded, as in C). With a budget set, a first
     fragment whose buffer would push the bytes held by in-progress

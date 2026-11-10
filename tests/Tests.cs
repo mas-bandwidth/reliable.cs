@@ -67,6 +67,7 @@ internal static partial class Tests
         // the C suite, test for test
         RunTest("test_sequence_buffer", TestSequenceBuffer);
         RunTest("test_sequence_buffer_wrap_sizes", TestSequenceBufferWrapSizes);
+        RunTest("test_sequence_buffer_non_power_of_two_wrap", TestSequenceBufferNonPowerOfTwoWrap);
         RunTest("test_generate_ack_bits", TestGenerateAckBits);
         RunTest("test_packet_header", TestPacketHeader);
         RunTest("test_acks", TestAcks);
@@ -82,6 +83,7 @@ internal static partial class Tests
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_default_config_holds_every_unfinished_reassembly", TestDefaultConfigHoldsEveryUnfinishedReassembly);
+        RunTest("test_rounded_reassembly_buffer_reset", TestRoundedReassemblyBufferReset);
         RunTest("test_rtt", TestRtt);
         RunTest("test_packet_loss_estimator", TestPacketLossEstimator);
         RunTest("test_jitter_estimator", TestJitterEstimator);
@@ -265,121 +267,127 @@ internal static partial class Tests
         }
     }
 
-    private sealed class SequenceBufferReferenceModel
+    // the sequence window as the C reference defines it, independent of the
+    // buffer's slot layout: a set of present sequences and a head. the oldest
+    // sequence the window accepts is head - window; anything behind it is stale.
+    // a sequence at or past the head moves the head to sequence + 1 and drops
+    // what fell out the back.
+    private sealed class SequenceWindowModel
     {
-        private readonly ushort?[] _entries;
+        private readonly HashSet<ushort> _present = new HashSet<ushort>();
+        private readonly int _window;
 
-        internal ushort Sequence;
+        internal ushort Head;
 
-        internal SequenceBufferReferenceModel(int numEntries)
+        internal SequenceWindowModel(int window)
         {
-            _entries = new ushort?[numEntries];
+            _window = window;
         }
 
-        internal bool TestInsert(ushort sequence)
+        // a is behind b by 1 .. 32768 in the 16-bit sequence space
+        private static bool Behind(ushort a, ushort b)
         {
-            return !Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length));
+            int distance = (ushort)(b - a);
+            return distance >= 1 && distance <= 32768;
         }
 
-        internal int Insert(ushort sequence)
+        internal bool Stale(ushort sequence)
         {
-            if (Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length)))
-            {
-                return -1;
-            }
-
-            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
-            {
-                RemoveEntries(Sequence, sequence);
-                Sequence = (ushort)(sequence + 1);
-            }
-
-            int index = sequence % _entries.Length;
-            _entries[index] = sequence;
-            return index;
+            return Behind(sequence, (ushort)(Head - _window));
         }
 
         internal void Advance(ushort sequence)
         {
-            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+            if (!Behind(Head, (ushort)(sequence + 1)))
             {
-                RemoveEntries(Sequence, sequence);
-                Sequence = (ushort)(sequence + 1);
+                return;
             }
+            Head = (ushort)(sequence + 1);
+            _present.RemoveWhere(Stale);
+        }
+
+        internal bool Insert(ushort sequence)
+        {
+            if (Stale(sequence))
+            {
+                return false;
+            }
+            Advance(sequence);
+            _present.Add(sequence);
+            return true;
         }
 
         internal void Remove(ushort sequence)
         {
-            _entries[sequence % _entries.Length] = null;
+            _present.Remove(sequence);
         }
 
-        internal int Find(ushort sequence)
+        internal bool Contains(ushort sequence)
         {
-            int index = sequence % _entries.Length;
-            return _entries[index] == sequence ? index : -1;
-        }
-
-        private void RemoveEntries(ushort startSequence, ushort finishSequence)
-        {
-            int start = startSequence;
-            int finish = finishSequence;
-
-            if (finish < start)
-            {
-                finish += 65536;
-            }
-
-            if (finish - start < _entries.Length)
-            {
-                for (int sequence = start; sequence <= finish; ++sequence)
-                {
-                    _entries[(ushort)sequence % _entries.Length] = null;
-                }
-            }
-            else
-            {
-                Array.Clear(_entries, 0, _entries.Length);
-            }
+            return _present.Contains(sequence);
         }
     }
 
+    private static void CheckSequenceWindow(SequenceBuffer<TestSequenceData> sequenceBuffer, SequenceWindowModel model, string what)
+    {
+        Check(sequenceBuffer.Sequence == model.Head, $"{what}: head is {sequenceBuffer.Sequence}, expected {model.Head}");
+
+        for (int offset = -8; offset <= 8; ++offset)
+        {
+            ushort probe = (ushort)(model.Head + offset);
+            int index = sequenceBuffer.Find(probe);
+            Check(sequenceBuffer.Exists(probe) == model.Contains(probe), $"{what}: exists {probe}");
+            Check((index >= 0) == model.Contains(probe), $"{what}: find {probe}");
+            if (index >= 0)
+            {
+                Check(sequenceBuffer.EntryAt(index).Sequence == probe, $"{what}: entry for {probe}");
+            }
+        }
+
+        sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+        Check(ack == (ushort)(model.Head - 1), $"{what}: ack");
+        for (int i = 0; i < 32; ++i)
+        {
+            bool expected = model.Contains((ushort)(ack - i));
+            Check(((ackBits >> i) & 1) == (expected ? 1u : 0u), $"{what}: ack bit {i}");
+        }
+    }
+
+    // requested capacities 4 and 3 across 65535 -> 0. the model's window is the
+    // buffer's entry count, so a buffer whose slots alias at the wrap (65535 and 0
+    // in one slot) loses an entry the model still holds. 3 rounds up to 4.
     private static void TestSequenceBufferWrapSizes()
     {
         int[] capacities = { 4, 3 };
         ushort[] sequences = { 65534, 65535, 0, 1 };
-        ushort[] probes = { 65533, 65534, 65535, 0, 1, 2 };
 
         foreach (int capacity in capacities)
         {
             SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(capacity);
-            SequenceBufferReferenceModel model = new SequenceBufferReferenceModel(capacity);
+            SequenceWindowModel model = new SequenceWindowModel(sequenceBuffer.NumEntries);
+
+            CheckSequenceWindow(sequenceBuffer, model, $"capacity {capacity}: empty");
 
             sequenceBuffer.Advance(65533);
             model.Advance(65533);
-            Check(sequenceBuffer.Sequence == model.Sequence, $"capacity {capacity}: sequence after advance");
+            CheckSequenceWindow(sequenceBuffer, model, $"capacity {capacity}: advance 65533");
 
             foreach (ushort sequence in sequences)
             {
-                Check(sequenceBuffer.TestInsert(sequence) == model.TestInsert(sequence),
+                Check(sequenceBuffer.TestInsert(sequence) == !model.Stale(sequence),
                     $"capacity {capacity}: test insert {sequence}");
 
                 int index = sequenceBuffer.Insert(sequence);
-                int expectedIndex = model.Insert(sequence);
+                bool expected = model.Insert(sequence);
 
-                Check(index == expectedIndex, $"capacity {capacity}: insert {sequence} returned {index}, expected {expectedIndex}");
-                Check(sequenceBuffer.Sequence == model.Sequence,
-                    $"capacity {capacity}: sequence after insert {sequence} is {sequenceBuffer.Sequence}, expected {model.Sequence}");
+                Check((index >= 0) == expected, $"capacity {capacity}: insert {sequence} returned {index}");
 
                 if (index >= 0)
                 {
                     sequenceBuffer.EntryAt(index).Sequence = sequence;
                 }
 
-                foreach (ushort probe in probes)
-                {
-                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
-                        $"capacity {capacity}: find {probe} after insert {sequence}");
-                }
+                CheckSequenceWindow(sequenceBuffer, model, $"capacity {capacity}: insert {sequence}");
             }
 
             foreach (ushort sequence in sequences)
@@ -387,12 +395,49 @@ internal static partial class Tests
                 sequenceBuffer.RemoveWithCleanup(sequence, _ => { });
                 model.Remove(sequence);
 
-                foreach (ushort probe in probes)
+                CheckSequenceWindow(sequenceBuffer, model, $"capacity {capacity}: remove {sequence}");
+            }
+
+            Check(sequenceBuffer.NumEntries >= capacity, $"capacity {capacity}: num entries covers the request");
+            Check((sequenceBuffer.NumEntries & (sequenceBuffer.NumEntries - 1)) == 0, $"capacity {capacity}: num entries is a power of two");
+        }
+    }
+
+    // ------------------------------------------------------------
+    // test_sequence_buffer_non_power_of_two_wrap
+
+    private static void TestSequenceBufferNonPowerOfTwoWrap()
+    {
+        int[] sizes = { 3, 255 };
+        foreach (int size in sizes)
+        {
+            SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(size);
+
+            int window = Math.Min(size, 32);
+            int start = 65536 - 2 * size;
+            sequenceBuffer.Sequence = (ushort)start;
+            for (int i = 0; i < 4 * size; ++i)
+            {
+                ushort sequence = (ushort)(start + i);
+                Check(sequenceBuffer.Insert(sequence) != -1, $"size {size}: insert({sequence})");
+
+                for (int j = 0; j < Math.Min(i + 1, size); ++j)
                 {
-                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
-                        $"capacity {capacity}: find {probe} after remove {sequence}");
+                    ushort recent = (ushort)(sequence - j);
+                    Check(sequenceBuffer.Exists(recent), $"size {size}: {recent} present after insert({sequence})");
+                    Check(sequenceBuffer.Find(recent) != -1, $"size {size}: find({recent}) after insert({sequence})");
+                }
+
+                sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+                Check(ack == sequence, $"size {size}: ack after insert({sequence})");
+                for (int j = 0; j < Math.Min(i + 1, window); ++j)
+                {
+                    Check((ackBits & (1u << j)) != 0, $"size {size}: ack bit {j} after insert({sequence})");
                 }
             }
+
+            Check(sequenceBuffer.NumEntries >= size, $"size {size}: num entries covers the request");
+            Check((sequenceBuffer.NumEntries & (sequenceBuffer.NumEntries - 1)) == 0, $"size {size}: num entries is a power of two");
         }
     }
 
@@ -1227,6 +1272,41 @@ internal static partial class Tests
 
         context.Receiver.Reset();
         Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
+    }
+
+    // ------------------------------------------------------------
+    // a reassembly size of 5 rounds up to 8 slots, as in C. every slot holds a
+    // reassembly, and reset releases all 8, not only the configured 5
+
+    private static void TestRoundedReassemblyBufferReset()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentReassemblyBufferSize = 5;
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        const int numFragments = 2;
+        const int numSlots = 8;
+        int slotBytes = Wire.MaxPacketHeaderBytes + numFragments * receiverConfig.FragmentSize + 8;
+
+        for (int sequence = 0; sequence < numSlots; ++sequence)
+        {
+            byte[] fragment = BuildFragment((ushort)sequence, numFragments - 1, numFragments, 1, 0, 0);
+            context.Receiver.ReceivePacket(fragment);
+        }
+
+        Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "no fragment refused");
+        Check(context.Receiver.OutstandingReassemblyBuffers == numSlots, "a reassembly in each of the 8 slots");
+        Check(context.Receiver.OutstandingReassemblyBytes == numSlots * slotBytes, "outstanding bytes count all 8 slots");
+
+        context.Receiver.Reset();
+        Check(context.Receiver.OutstandingReassemblyBuffers == 0, "reset releases every slot");
+        Check(context.Receiver.OutstandingReassemblyBytes == 0, "no outstanding bytes after reset");
     }
 
     // ------------------------------------------------------------

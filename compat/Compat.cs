@@ -624,8 +624,8 @@ internal static class Program
     // header-plus-packet bound is computed in 64 bits). One line per input, byte
     // for byte identical to c/compat.c: `<field> <value> <created|refused>`, and
     // for a created config an `ack <n>` line after a one-byte send is acked by a
-    // peer through the in-memory callbacks. The port's power-of-two and 16384
-    // bound is ahead of the pinned C release, which only requires a positive
+    // peer through the in-memory callbacks. The port's 16384 bound and
+    // power-of-two rounding are ahead of the pinned C release, which only requires a positive
     // size, so only sizes both accept or both refuse are fed here; tests/Tests.cs
     // pins the rest.
 

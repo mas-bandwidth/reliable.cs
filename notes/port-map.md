@@ -74,9 +74,9 @@ and drops, exactly like C.
 
 - `EndpointConfig` validation → constructor throws for nonpositive packet,
   fragment, ack, and history sizes; missing callbacks; and limits that prevent
-  invalid packet lengths. This port additionally requires each sequence-buffer
-  size to be a power of two ≤ 16384 and each smoothing factor to be finite and
-  in [0,1]. Validation happens once at construction, with no steady-state cost.
+  invalid packet lengths. Each sequence-buffer size must be ≤ 16384 and is
+  rounded up to a power of two, and each smoothing factor must be finite and
+  in [0,1], as in C main. Validation happens once at construction, with no steady-state cost.
 - `SendPacket` with an empty span → `ArgumentException` (C: assert).
   `ReceivePacket` counts an empty datagram as invalid and drops it without
   throwing.
