@@ -356,12 +356,6 @@ internal sealed class SequenceBuffer<T> where T : struct
         }
     }
 
-    // reliable_sequence_buffer_remove
-    internal void Remove(ushort sequence)
-    {
-        _entrySequence[sequence % NumEntries] = EmptySentinel;
-    }
-
     // reliable_sequence_buffer_remove_with_cleanup
     internal void RemoveWithCleanup(ushort sequence, Action<int> cleanup)
     {
@@ -371,11 +365,6 @@ internal sealed class SequenceBuffer<T> where T : struct
             _entrySequence[index] = EmptySentinel;
             cleanup(index);
         }
-    }
-
-    internal bool Available(ushort sequence)
-    {
-        return _entrySequence[sequence % NumEntries] == EmptySentinel;
     }
 
     internal bool Exists(ushort sequence)
@@ -1669,7 +1658,5 @@ public sealed class Endpoint
 
     // internal access for the mirrored C test suite (the C tests reach into
     // endpoint->fragment_reassembly and friends)
-    internal SequenceBuffer<SentPacketData> SentPackets => _sentPackets;
-    internal SequenceBuffer<ReceivedPacketData> ReceivedPackets => _receivedPackets;
     internal bool FragmentReassemblyExists(ushort sequence) => _fragmentReassembly.Exists(sequence);
 }
