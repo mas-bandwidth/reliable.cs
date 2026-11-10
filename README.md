@@ -65,8 +65,9 @@ scripts/interop.sh path/to/reliable     # defaults to ../reliable
 ```
 
 Builds `compat/c/compat.c` against the real `reliable.c`, then runs both halves
-across wire-vector and scripted-scenario modes and diffs the outputs; any byte
-of difference fails. Two requirements the script enforces and CI pins:
+across the wire-vector, receive-bounds, malformed-input, config-refusal,
+hardening and scripted-scenario modes and diffs the outputs; any byte of
+difference fails. Two requirements the script enforces and CI pins:
 
 - `-ffp-contract=off` on the C build is required, not optional: C# always
   evaluates float expressions strictly, and default clang/gcc on ARM64 contract
@@ -136,16 +137,18 @@ C# programmer would expect. The differences, all recorded in
   per packet. That includes the send path's fragment-count assert, checked at
   construction as "MaxFragments must cover MaxPacketSize". The C reference's
   other bounds hold too (fragment_above may not exceed max_packet_size;
-  max_fragments * fragment_size, max_packet_size and packet_header_size +
-  max_packet_size are each checked against INT_MAX).
-- Three bounds go beyond the pinned C release (`v1.4.5`). The
+  max_fragments * fragment_size and max_packet_size are each checked against
+  INT_MAX).
+- Four bounds go beyond the pinned C release (`v1.4.5`). The
   unit tests pin them; the interop gate feeds only inputs on which both
   implementations agree:
+  - `PacketHeaderSize + MaxPacketSize`, plus the 14 header bytes a received
+    datagram may carry, must fit in an int (C checks the sum without the 14).
   - The three sequence buffers (`SentPacketsBufferSize`,
     `ReceivedPacketsBufferSize`, `FragmentReassemblyBufferSize`) must each be
     a power of two no larger than 16384 (C requires only a positive size).
   - Unfinished reassemblies are bounded by `FragmentReassemblyByteBudget`
-    (256 KB by default; `0` = unbounded, the C release's behaviour). A first
+    (256 KB by default; `0` = unbounded). A first
     fragment whose buffer would push the bytes held by in-progress
     reassemblies past the budget is refused and counted `NumFragmentsInvalid`.
   - An empty receive is counted invalid and dropped (C asserts

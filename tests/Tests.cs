@@ -81,7 +81,8 @@ internal static partial class Tests
         RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
         RunTest("test_rtt_min_large", TestRttMinLarge);
 
-        // golden wire pins, generated from the real C library (v1.4.0)
+        // golden wire pins, generated from the real C library (v1.4.0; the
+        // interop vectors gate shows the pinned v1.4.5 emits the same bytes)
         RunTest("test_golden_packet_headers", TestGoldenPacketHeaders);
         RunTest("test_golden_fragments", TestGoldenFragments);
 
@@ -89,6 +90,7 @@ internal static partial class Tests
         RunTest("test_hostile_truncated_headers", TestHostileTruncatedHeaders);
         RunTest("test_hostile_fragments", TestHostileFragments);
         RunTest("test_fragment_advances_received_window", TestFragmentAdvancesReceivedWindow);
+        RunTest("test_two_fragment_packet_reassembles", TestTwoFragmentPacketReassembles);
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
         RunTest("test_receive_empty_packet_is_counted_invalid", TestReceiveEmptyPacketIsCountedInvalid);

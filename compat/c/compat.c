@@ -863,7 +863,9 @@ static void run_config_refusal( void )
         }
     }
 
-    /* R4: packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX.
+    /* R4: the port refuses packet_header_size + max_packet_size + 9 + 5 above
+       INT_MAX; the pinned C release refuses packet_header_size +
+       max_packet_size above INT_MAX.
        the three edge configs vary only the header and max packet size, so the
        fragment-cover bound (a large max at the default 16 x 1024 fragments)
        refuses each before any allocation; that refusal, not the header-plus-

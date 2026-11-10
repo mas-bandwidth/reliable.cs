@@ -26,8 +26,12 @@ FP_CONTRACT="${FP_CONTRACT:--ffp-contract=off}"
 # Hermetic when no C reference is reachable: the differential leg needs a real
 # checkout of mas-bandwidth/reliable, named by the argument (or the ../reliable
 # default). Without one, skip loudly and succeed so local/unit runs are not
-# blocked; CI always passes the pinned checkout.
+# blocked; under CI (CI set) a missing checkout fails the gate.
 if [ ! -f "$C_RELIABLE/reliable.c" ]; then
+    if [ -n "${CI:-}" ]; then
+        echo "error: no C reference checkout at $C_RELIABLE" >&2
+        exit 1
+    fi
     echo "SKIP: no C reference checkout at $C_RELIABLE" >&2
     echo "SKIP: pass one explicitly: scripts/interop.sh <path-to-reliable>" >&2
     exit 0

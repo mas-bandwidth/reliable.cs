@@ -201,6 +201,7 @@ internal static class Program
             FragmentAbove = 50,
             FragmentSize = 50,
             MaxFragments = 16,
+            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = (id, sequence, packetData) => { },
             ProcessPacket = MalformedProcess,
         };
@@ -508,6 +509,7 @@ internal static class Program
             FragmentAbove = 500,
             FragmentSize = 500,
             MaxFragments = 16,
+            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = ScenarioTransmit,
             ProcessPacket = ScenarioProcess,
         }, time);
@@ -520,6 +522,7 @@ internal static class Program
             FragmentAbove = 500,
             FragmentSize = 500,
             MaxFragments = 16,
+            FragmentReassemblyByteBudget = 0, // the pinned C release has no budget
             TransmitPacket = ScenarioTransmit,
             ProcessPacket = ScenarioProcess,
         }, time);
@@ -703,7 +706,9 @@ internal static class Program
             }
         }
 
-        // R4: packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX.
+        // R4: the port refuses packet_header_size + max_packet_size + 9 + 5 above
+        // INT_MAX; the pinned C release refuses packet_header_size +
+        // max_packet_size above INT_MAX.
         // the three edge configs vary only the header and max packet size, so the
         // fragment-cover bound refuses each before any allocation; that refusal is
         // what the differential pins for these inputs.

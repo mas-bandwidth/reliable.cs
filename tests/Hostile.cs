@@ -227,6 +227,31 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // an in-order fragmented packet (500 + 250 = 1.5 x fragment_size) at
+    // sequence 0 reassembles from two fragments and is delivered at full size
+
+    private static void TestTwoFragmentPacketReassembles()
+    {
+        int deliveredLength = -1;
+        ushort deliveredSequence = 0xFFFF;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            Name = "sink",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { deliveredSequence = sequence; deliveredLength = packetData.Length; return true; },
+        }, 100.0);
+        sink.ReceivePacket(BuildFragment(0, 0, 2, 500, 0xFFFF, 0));
+        sink.ReceivePacket(BuildFragment(0, 1, 2, 250, 0xFFFF, 0));
+        Check(deliveredSequence == 0, "reassembled packet delivered at sequence 0");
+        Check(deliveredLength == 750, $"reassembled packet delivered at full size, got {deliveredLength}");
+        Check(!sink.FragmentReassemblyExists(0), "reassembly slot cleaned up");
+    }
+
+    // ------------------------------------------------------------
     // parser fuzz: random bytes through both header parsers, no exceptions ever
 
     private static void TestHostileParserFuzz()
@@ -397,7 +422,8 @@ internal static partial class Tests
 
     // ------------------------------------------------------------
     // the three sequence buffers must each be a power of two no larger than
-    // 16384, exactly like the C reference: 100, 32768, 65535 and 65536 are
+    // 16384 (stricter than the pinned C release, which requires only a positive
+    // size): 100, 32768, 65535 and 65536 are
     // refused on each field; 256 and 16384 are accepted and carry a one-byte send
 
     private static void TestConfigRefusesBadSequenceBufferSizes()
