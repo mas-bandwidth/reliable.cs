@@ -77,6 +77,9 @@ internal static partial class Tests
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
+        RunTest("test_packet_loss_estimator", TestPacketLossEstimator);
+        RunTest("test_jitter_estimator", TestJitterEstimator);
+        RunTest("test_bandwidth_estimators", TestBandwidthEstimators);
         RunTest("test_endpoint_reset", TestEndpointReset);
         RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
         RunTest("test_rtt_min_large", TestRttMinLarge);
@@ -930,7 +933,9 @@ internal static partial class Tests
     private static void TestRtt()
     {
         double time = 100.0;
-        const double deltaTime = 0.01;
+        const double roundTripTime = 0.05;
+        const int numRoundTrips = 10;
+        const float expectedRtt = 50.0f;
 
         TestContext context = new TestContext();
 
@@ -939,25 +944,168 @@ internal static partial class Tests
 
         byte[] dummyPacket = new byte[8];
 
-        for (int i = 0; i < 1000; ++i)
+        for (int i = 0; i < numRoundTrips; ++i)
         {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
             context.Sender.SendPacket(dummyPacket);
-            context.Receiver.SendPacket(dummyPacket);
+
+            time += roundTripTime;
 
             context.Sender.Update(time);
             context.Receiver.Update(time);
 
-            time += deltaTime;
+            context.Receiver.SendPacket(dummyPacket);
         }
+
+        context.Sender.Update(time);
 
         float rtt = context.Sender.Rtt;
         float rttMin = context.Sender.RttMin;
         float rttMax = context.Sender.RttMax;
         float rttAvg = context.Sender.RttAvg;
 
-        Check(!float.IsNaN(rtt) && rtt >= 0, "rtt is finite and non-negative");
-        Check(rttMin >= 0 && rttMin <= rttAvg && rttAvg <= rttMax, "rtt min <= avg <= max");
-        Check(rttMax < 1000.0f, "rtt is in milliseconds");
+        Check(Math.Abs(rtt - expectedRtt) < 0.01f, $"rtt is {rtt}, expected {expectedRtt}");
+        Check(Math.Abs(rttMin - expectedRtt) < 0.01f, $"rtt min is {rttMin}, expected {expectedRtt}");
+        Check(Math.Abs(rttMax - expectedRtt) < 0.01f, $"rtt max is {rttMax}, expected {expectedRtt}");
+        Check(Math.Abs(rttAvg - expectedRtt) < 0.01f, $"rtt avg is {rttAvg}, expected {expectedRtt}");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt) < 0.01f, "jitter average vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt) < 0.01f, "jitter max vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt) < 0.01f, "jitter stddev vs avg rtt is zero");
+    }
+
+    // ------------------------------------------------------------
+    // test_packet_loss_estimator
+
+    private static void TestPacketLossEstimator()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.PacketLossSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Drop = (i % 4) == 1;
+            context.Sender.SendPacket(dummyPacket);
+            context.Drop = false;
+            context.Receiver.SendPacket(dummyPacket);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+
+        float packetLoss = context.Sender.PacketLoss;
+
+        Check(Math.Abs(packetLoss - 25.0f) < 0.01f, $"packet loss is {packetLoss}, expected 25");
+    }
+
+    // ------------------------------------------------------------
+    // test_jitter_estimator
+
+    private static void TestJitterEstimator()
+    {
+        double time = 100.0;
+
+        float[] roundTripTimesMs = { 10.0f, 20.0f, 10.0f, 20.0f };
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        foreach (float roundTripTimeMs in roundTripTimesMs)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(dummyPacket);
+
+            time += roundTripTimeMs / 1000.0;
+
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Receiver.SendPacket(dummyPacket);
+        }
+
+        context.Sender.Update(time);
+
+        Check(Math.Abs(context.Sender.RttMin - 10.0f) < 0.01f, $"rtt min is {context.Sender.RttMin}, expected 10");
+        Check(Math.Abs(context.Sender.RttMax - 20.0f) < 0.01f, $"rtt max is {context.Sender.RttMax}, expected 20");
+        Check(Math.Abs(context.Sender.RttAvg - 15.0f) < 0.01f, $"rtt avg is {context.Sender.RttAvg}, expected 15");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt - 5.0f) < 0.01f, $"jitter average vs min rtt is {context.Sender.JitterAvgVsMinRtt}, expected 5");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt - 10.0f) < 0.01f, $"jitter max vs min rtt is {context.Sender.JitterMaxVsMinRtt}, expected 10");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt - 5.0f) < 0.01f, $"jitter stddev vs avg rtt is {context.Sender.JitterStddevVsAvgRtt}, expected 5");
+    }
+
+    // ------------------------------------------------------------
+    // test_bandwidth_estimators
+
+    private static void TestBandwidthEstimators()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+        const int packetHeaderSize = 28;
+        const int wireHeaderBytes = 8;
+        const int payloadBytes = 100;
+        const int windowSamples = numPackets / 2;
+        const double windowSeconds = (windowSamples - 1) * deltaTime;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.BandwidthSmoothingFactor = 1.0f;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.ReceivedPacketsBufferSize = numPackets;
+        receiverConfig.BandwidthSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        byte[] packet = new byte[payloadBytes];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(packet);
+            context.Receiver.SendPacket(packet);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+
+        float sentExpected = (float)(windowSamples * (packetHeaderSize + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float receivedExpected = (float)(windowSamples * (packetHeaderSize + wireHeaderBytes + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float ackedExpected = sentExpected;
+
+        Check(Math.Abs(context.Sender.SentBandwidthKbps - sentExpected) < 0.01f, $"sent bandwidth is {context.Sender.SentBandwidthKbps}, expected {sentExpected}");
+        Check(Math.Abs(context.Receiver.ReceivedBandwidthKbps - receivedExpected) < 0.01f, $"received bandwidth is {context.Receiver.ReceivedBandwidthKbps}, expected {receivedExpected}");
+        Check(Math.Abs(context.Sender.AckedBandwidthKbps - ackedExpected) < 0.01f, $"acked bandwidth is {context.Sender.AckedBandwidthKbps}, expected {ackedExpected}");
     }
 
     // ------------------------------------------------------------
