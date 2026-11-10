@@ -16,7 +16,7 @@ C# expert would write.
 | `reliable_endpoint_destroy` | — (GC) | No unmanaged resources. Reassembly buffers are pooled; abandoned rentals are ordinary garbage. No IDisposable: nothing to dispose deterministically. |
 | `reliable_endpoint_next_packet_sequence` | `Endpoint.NextPacketSequence` (ushort property) | |
 | `reliable_endpoint_send_packet` | `Endpoint.SendPacket(ReadOnlySpan<byte>)` | Length > max → counter + drop (same as C). Empty span throws (C asserts `packet_bytes > 0`). Negative length is unrepresentable in C#. |
-| `reliable_endpoint_receive_packet` | `Endpoint.ReceivePacket(ReadOnlySpan<byte>)` | Never throws on wire data, no matter how hostile. Empty span throws (C asserts). |
+| `reliable_endpoint_receive_packet` | `Endpoint.ReceivePacket(ReadOnlySpan<byte>)` | Never throws on wire data, no matter how hostile. An empty datagram is counted invalid and dropped (C asserts). |
 | `reliable_endpoint_free_packet` | — (dropped) | C-allocator API; meaningless under GC. |
 | `reliable_endpoint_get_acks` | `Endpoint.GetAcks()` → `ReadOnlySpan<ushort>` | Span over the internal ack array, valid until `ClearAcks`/`Reset`. |
 | `reliable_endpoint_clear_acks` | `Endpoint.ClearAcks()` | |
@@ -77,7 +77,9 @@ and drops, exactly like C.
   invalid packet lengths. This port additionally requires each sequence-buffer
   size to be a power of two ≤ 16384 and each smoothing factor to be finite and
   in [0,1]. Validation happens once at construction, with no steady-state cost.
-- `SendPacket`/`ReceivePacket` with an empty span → `ArgumentException` (C: assert).
+- `SendPacket` with an empty span → `ArgumentException` (C: assert).
+  `ReceivePacket` counts an empty datagram as invalid and drops it without
+  throwing.
 - Everything the C library runtime-checks on the receive path is runtime-checked
   here, identically.
 - Internal invariants (e.g. sent-buffer insert cannot fail on the send path) →

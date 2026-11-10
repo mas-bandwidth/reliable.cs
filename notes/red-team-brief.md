@@ -59,8 +59,8 @@ Behavior:
 5. `ReceivePacket` never throws, whatever the bytes — malformed, truncated,
    corrupted, oversized, replayed, forged fragments, anything. Failures land in
    counters and the packet is dropped.
-6. Exceptions occur only for API misuse: invalid config at construction, empty
-   spans on send/receive.
+6. Exceptions occur only for API misuse: invalid config at construction, an
+   empty span on send.
 7. Steady state allocates zero GC bytes: `SendPacket` (both shapes),
    `ReceivePacket` (regular packets and fragments of an existing reassembly),
    `Update`, `GetAcks`, `ClearAcks`, with logging at its default level. Only a
