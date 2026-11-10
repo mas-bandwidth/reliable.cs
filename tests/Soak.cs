@@ -116,8 +116,9 @@ internal static partial class Tests
 
     private static void SoakValidatePayload(ReadOnlySpan<byte> payload, ulong senderId, ushort sequence, string endpoint, ulong seed, int iteration)
     {
-        Check(payload.Length == SoakCleanPayloadSize(sequence),
-            $"{endpoint} delivered a payload of {payload.Length} bytes, expected {SoakCleanPayloadSize(sequence)} (seed {seed}, iteration {iteration}, sequence {sequence})");
+        int expectedBytes = SoakCleanPayloadSize(sequence);
+        Check(payload.Length == expectedBytes,
+            $"{endpoint} delivered a payload of {payload.Length} bytes, expected {expectedBytes} (seed {seed}, iteration {iteration}, sequence {sequence})");
         Check(payload.Length >= 3,
             $"{endpoint} delivered a payload shorter than its header (seed {seed}, iteration {iteration}, sequence {sequence})");
         Check(payload[0] == (byte)(0xA0 | (int)senderId),
@@ -308,6 +309,7 @@ internal static partial class Tests
             {
                 Name = name,
                 Id = id,
+                ReceivedPacketsBufferSize = SoakReceiveWindow,
                 TransmitPacket = (cbId, sequence, packetData) =>
                 {
                     SoakLink link = cbId == 0 ? clientToServer : serverToClient;
