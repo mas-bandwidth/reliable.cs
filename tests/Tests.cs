@@ -372,7 +372,7 @@ internal static partial class Tests
 
             foreach (ushort sequence in sequences)
             {
-                sequenceBuffer.Remove(sequence);
+                sequenceBuffer.RemoveWithCleanup(sequence, _ => { });
                 model.Remove(sequence);
 
                 foreach (ushort probe in probes)
