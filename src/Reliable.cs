@@ -302,20 +302,20 @@ internal sealed class SequenceBuffer<T> where T : struct
     // reliable_sequence_buffer_test_insert: false = would be rejected as stale.
     internal bool TestInsert(ushort sequence)
     {
-        return !Seq.LessThan(sequence, (ushort)(Sequence - (ushort)NumEntries));
+        return !Seq.LessThan(sequence, unchecked((ushort)(Sequence - (ushort)NumEntries)));
     }
 
     // reliable_sequence_buffer_insert: returns the slot index, or -1 if stale.
     internal int Insert(ushort sequence)
     {
-        if (Seq.LessThan(sequence, (ushort)(Sequence - (ushort)NumEntries)))
+        if (Seq.LessThan(sequence, unchecked((ushort)(Sequence - (ushort)NumEntries))))
         {
             return -1;
         }
-        if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+        if (Seq.GreaterThan(unchecked((ushort)(sequence + 1)), Sequence))
         {
             RemoveEntries(Sequence, sequence, null);
-            Sequence = (ushort)(sequence + 1);
+            Sequence = unchecked((ushort)(sequence + 1));
         }
         int index = sequence % NumEntries;
         _entrySequence[index] = sequence;
@@ -325,10 +325,10 @@ internal sealed class SequenceBuffer<T> where T : struct
     // reliable_sequence_buffer_advance
     internal void Advance(ushort sequence)
     {
-        if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+        if (Seq.GreaterThan(unchecked((ushort)(sequence + 1)), Sequence))
         {
             RemoveEntries(Sequence, sequence, null);
-            Sequence = (ushort)(sequence + 1);
+            Sequence = unchecked((ushort)(sequence + 1));
         }
     }
 
@@ -336,12 +336,12 @@ internal sealed class SequenceBuffer<T> where T : struct
     // from Insert (advance checked first, stale second) — that is the C.
     internal int InsertWithCleanup(ushort sequence, Action<int> cleanup)
     {
-        if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+        if (Seq.GreaterThan(unchecked((ushort)(sequence + 1)), Sequence))
         {
             RemoveEntries(Sequence, sequence, cleanup);
-            Sequence = (ushort)(sequence + 1);
+            Sequence = unchecked((ushort)(sequence + 1));
         }
-        else if (Seq.LessThan(sequence, (ushort)(Sequence - (ushort)NumEntries)))
+        else if (Seq.LessThan(sequence, unchecked((ushort)(Sequence - (ushort)NumEntries))))
         {
             return -1;
         }
@@ -357,10 +357,10 @@ internal sealed class SequenceBuffer<T> where T : struct
     // reliable_sequence_buffer_advance_with_cleanup
     internal void AdvanceWithCleanup(ushort sequence, Action<int> cleanup)
     {
-        if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+        if (Seq.GreaterThan(unchecked((ushort)(sequence + 1)), Sequence))
         {
             RemoveEntries(Sequence, sequence, cleanup);
-            Sequence = (ushort)(sequence + 1);
+            Sequence = unchecked((ushort)(sequence + 1));
         }
     }
 
@@ -396,12 +396,12 @@ internal sealed class SequenceBuffer<T> where T : struct
     // reliable_sequence_buffer_generate_ack_bits
     internal void GenerateAckBits(out ushort ack, out uint ackBits)
     {
-        ack = (ushort)(Sequence - 1);
+        ack = unchecked((ushort)(Sequence - 1));
         ackBits = 0;
         uint mask = 1;
         for (int i = 0; i < 32; ++i)
         {
-            ushort sequence = (ushort)(ack - (ushort)i);
+            ushort sequence = unchecked((ushort)(ack - (ushort)i));
             if (Exists(sequence))
             {
                 ackBits |= mask;
@@ -541,7 +541,7 @@ internal static class Wire
                 return -1;
             }
             byte sequenceDifference = packetData[p++];
-            ack = (ushort)(sequence - sequenceDifference);
+            ack = unchecked((ushort)(sequence - sequenceDifference));
         }
         else
         {
@@ -994,7 +994,7 @@ public sealed class Endpoint
             return;
         }
 
-        ushort sequence = _sequence++;
+        ushort sequence = unchecked(_sequence++);
 
         _receivedPackets.GenerateAckBits(out ushort ack, out uint ackBits);
 
@@ -1161,7 +1161,7 @@ public sealed class Endpoint
                 {
                     if ((ackBits & 1) != 0)
                     {
-                        ushort ackSequence = (ushort)(ack - (ushort)i);
+                        ushort ackSequence = unchecked((ushort)(ack - (ushort)i));
 
                         int sentPacketIndex = _sentPackets.Find(ackSequence);
 
