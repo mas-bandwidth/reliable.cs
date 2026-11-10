@@ -5,10 +5,10 @@
 #   scripts/interop.sh [path-to-c-reliable-clone]
 #
 # Builds the C half of the compat harness against the real reliable.c, then runs
-# both halves across the wire-vector mode, the empty-packet refusal, and the
-# scripted scenario profiles (clean, lossy, hostile — the hostile long run is
-# the differential soak), and diffs the outputs. Any byte of difference fails
-# the gate.
+# both halves across the wire-vector mode, the receive-boundary, malformed-input,
+# config and hardening pins, and the scripted scenario profiles (clean, lossy,
+# hostile, wrap — the long runs are the differential soaks), and diffs the
+# outputs. Any byte of difference fails the gate.
 #
 # CI pins the C clone to a release tag (see .github/workflows/ci.yml) and runs
 # this with CC=clang; locally the default compiler is fine and the clone may
@@ -76,12 +76,11 @@ gate() {
     wc -l < "$WORK/c.out" | awk '{print "   identical ("$1" trace lines)"}'
 }
 
-gate "empty packet on one receiver"    empty_packet
+gate "receive bounds on one receiver"  receive_bounds
 gate "wire vectors"                    vectors
 gate "malformed inputs"                malformed
 gate "config refusal"                  config_refusal
 gate "1.4.x hardening"                 hardening
-gate "reassembly byte budget"          byte_budget
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500

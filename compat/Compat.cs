@@ -164,8 +164,10 @@ internal static class Program
     // ------------------------------------------------------------
     // malformed mode
 
-    // one hostile / boundary input per checklist item 5: zero length, oversize,
-    // truncated headers, bad fragment counts. each vector is fed to a fresh
+    // one hostile / boundary input per checklist item 5: oversize, truncated
+    // headers, bad fragment counts. (a zero-length receive is not fed: the pinned
+    // C release asserts packet_bytes > 0, and the C# count-and-drop is pinned by
+    // tests/Hostile.cs.) each vector is fed to a fresh
     // endpoint; the line reports what the endpoint did and the eleven counters.
     // the C twin is run_malformed in c/compat.c. identical text.
 
@@ -207,7 +209,6 @@ internal static class Program
 
         (byte[] Data, string Label)[] vectors =
         {
-            (Array.Empty<byte>(), "zero-length"),
             (oversize, "oversize"),
             (new byte[] { 0x00 }, "prefix-only"),
             (new byte[] { 0x00, 0x01 }, "seq-truncated"),
@@ -232,14 +233,7 @@ internal static class Program
             s_malformedDeliveredSequence = 0;
             s_malformedDeliveredLength = 0;
 
-            try
-            {
-                endpoint.ReceivePacket(vectors[n].Data);
-            }
-            catch (ArgumentException)
-            {
-                // the port refuses an empty datagram; C counts it (finding, item 5)
-            }
+            endpoint.ReceivePacket(vectors[n].Data);
 
             string changed = "none";
             for (int i = 0; i < Endpoint.NumCounters; i++)
@@ -265,18 +259,17 @@ internal static class Program
     }
 
     // ------------------------------------------------------------
-    // empty_packet mode
+    // receive_bounds mode
 
-    // one receiver, six inputs, in order: a zero-length packet, a one-byte
-    // packet {0}, a one-byte packet {1}, max_packet_size + 14 zero bytes, one
+    // one receiver, five inputs, in order: a one-byte packet {0}, a one-byte packet {1}, max_packet_size + 14 zero bytes, one
     // byte more than that, then a valid packet from a sender. each line is
     // <input> <refused|accepted> <process callback ran 0|1> <eleven counters>.
-    // counters accumulate on that same receiver. the C twin is run_empty_packet.
+    // counters accumulate on that same receiver. the C twin is run_receive_bounds.
     // identical text.
 
     private static int s_emptyProcessRan;
 
-    private static void RunEmptyPacket()
+    private static void RunReceiveBounds()
     {
         EndpointConfig receiverConfig = new EndpointConfig
         {
@@ -298,14 +291,7 @@ internal static class Program
         void Feed(string label, ReadOnlySpan<byte> packet)
         {
             s_emptyProcessRan = 0;
-            try
-            {
-                receiver.ReceivePacket(packet);
-            }
-            catch (ArgumentException)
-            {
-                // an empty datagram that throws is a refusal that counted nothing
-            }
+            receiver.ReceivePacket(packet);
 
             ReadOnlySpan<ulong> counters = receiver.Counters;
             StringBuilder sb = new StringBuilder(160);
@@ -316,7 +302,6 @@ internal static class Program
             s_out.Write(sb.ToString());
         }
 
-        Feed("zero-length", ReadOnlySpan<byte>.Empty);
         Feed("byte-0", new byte[] { 0 });
         Feed("byte-1", new byte[] { 1 });
 
@@ -327,7 +312,7 @@ internal static class Program
         sender.SendPacket(new byte[] { 0x11 });
         if (sent == null || sent.Length == 0)
         {
-            Console.Error.WriteLine("empty_packet: sender produced no packet");
+            Console.Error.WriteLine("receive_bounds: sender produced no packet");
             s_out.Flush();
             Environment.Exit(1);
         }
@@ -634,12 +619,15 @@ internal static class Program
     // ------------------------------------------------------------
     // config_refusal mode
     //
-    // Differential pins for the config validation carried from the C reference
-    // (R3: sequence-buffer sizes are powers of two no larger than 16384; R4: the
+    // Differential pins for the config validation shared with the pinned C
+    // release (sequence-buffer sizes both accept or both refuse; R4: the
     // header-plus-packet bound is computed in 64 bits). One line per input, byte
     // for byte identical to c/compat.c: `<field> <value> <created|refused>`, and
     // for a created config an `ack <n>` line after a one-byte send is acked by a
-    // peer through the in-memory callbacks.
+    // peer through the in-memory callbacks. The port's power-of-two and 16384
+    // bound is ahead of the pinned C release, which only requires a positive
+    // size, so only sizes both accept or both refuse are fed here; tests/Tests.cs
+    // pins the rest.
 
     private static Endpoint? s_cfgSender;
     private static Endpoint? s_cfgReceiver;
@@ -693,7 +681,7 @@ internal static class Program
 
     private static void RunConfigRefusal()
     {
-        int[] values = { 0, 1, 2, 3, 100, 255, 256, 257, 16383, 16384, 16385, 32768, 65535, 65536, 65537 };
+        int[] values = { 0, 1, 2, 256, 16384 };
 
         for (int field = 0; field < 3; field++)
         {
@@ -859,101 +847,6 @@ internal static class Program
         PrintHardeningLine("fresh", s_hwSender!);
     }
 
-    // ------------------------------------------------------------
-    // byte_budget mode
-    //
-    // Differential pins for the unfinished-reassembly byte budget. A first
-    // fragment that would push the live reassembly bytes past the configured
-    // budget is refused (counted NUM_FRAGMENTS_INVALID); 0 = unbounded. Each
-    // crafted fragment prints one line: step, refused|accepted, the outstanding
-    // reassembly bytes, then the eleven counters. byte for byte identical to
-    // compat.c.
-
-    private static Endpoint BbEndpoint(int budget)
-    {
-        return new Endpoint(new EndpointConfig
-        {
-            Name = "byte_budget",
-            MaxPacketSize = 16384,
-            FragmentAbove = 500,
-            FragmentSize = 1024,
-            MaxFragments = 16,
-            FragmentReassemblyByteBudget = budget,
-            TransmitPacket = (id, sequence, packetData) => { },
-            ProcessPacket = (id, sequence, packetData) => true,
-        }, 100.0);
-    }
-
-    // a fragment: prefix 1, sequence LE, fragment id, count-1, then 0x5A payload.
-    // fragment 0 embeds the canonical packet header, exactly like the sender.
-    private static int BbBuildFragment(byte[] buffer, ushort sequence, int fragmentId, int numFragments, int payloadBytes)
-    {
-        int p = 0;
-        buffer[p++] = 1;
-        buffer[p++] = (byte)(sequence & 0xFF);
-        buffer[p++] = (byte)(sequence >> 8);
-        buffer[p++] = (byte)fragmentId;
-        buffer[p++] = (byte)(numFragments - 1);
-        if (fragmentId == 0)
-            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, 0xFFFF, 0);
-        for (int i = 0; i < payloadBytes; i++)
-            buffer[p++] = 0x5A;
-        return p;
-    }
-
-    private static void BbReport(string step, bool refused, Endpoint endpoint)
-    {
-        StringBuilder sb = new StringBuilder(160);
-        sb.Append(step).Append(' ').Append(refused ? "refused" : "accepted").Append(' ').Append(endpoint.OutstandingReassemblyBytes);
-        ReadOnlySpan<ulong> counters = endpoint.Counters;
-        for (int i = 0; i < counters.Length; i++)
-            sb.Append(' ').Append(counters[i]);
-        sb.Append('\n');
-        s_out.Write(sb.ToString());
-    }
-
-    private static void BbRunBudget(int budget, string label)
-    {
-        Endpoint endpoint = BbEndpoint(budget);
-        byte[] fragment = new byte[2048];
-
-        for (int seq = 0; seq < 64; seq++)
-        {
-            int fragmentBytes = BbBuildFragment(fragment, (ushort)seq, 15, 16, 1024);
-            ulong invalidBefore = endpoint.Counters[9];
-            endpoint.ReceivePacket(fragment.AsSpan(0, fragmentBytes));
-            BbReport(label + "-" + seq, endpoint.Counters[9] != invalidBefore, endpoint);
-        }
-
-        byte[] genuine = new byte[16];
-        int h = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
-        genuine[h] = 0;
-        endpoint.ReceivePacket(genuine.AsSpan(0, h + 1));
-        BbReport(label + "-genuine", false, endpoint);
-    }
-
-    private static void RunByteBudget()
-    {
-        // 64 crafted last fragments at 64 KB, then the same unbounded (0)
-        BbRunBudget(64 * 1024, "b64k");
-        BbRunBudget(0, "b0");
-
-        // a complete fragmented packet (1024 + 512 = 1.5 x fragment_size) within the budget
-        {
-            Endpoint endpoint = BbEndpoint(64 * 1024);
-            byte[] fragment = new byte[2048];
-
-            int n0 = BbBuildFragment(fragment, 0, 0, 2, 1024);
-            ulong invalidBefore = endpoint.Counters[9];
-            endpoint.ReceivePacket(fragment.AsSpan(0, n0));
-            BbReport("complete-0", endpoint.Counters[9] != invalidBefore, endpoint);
-
-            int n1 = BbBuildFragment(fragment, 0, 1, 2, 512);
-            endpoint.ReceivePacket(fragment.AsSpan(0, n1));
-            BbReport("complete-1", false, endpoint);
-        }
-    }
-
     private static int Main(string[] args)
     {
         // buffer stdout: the scenario traces are hundreds of thousands of lines
@@ -974,9 +867,9 @@ internal static class Program
             RunMalformed();
             result = 0;
         }
-        else if (args.Length >= 1 && args[0] == "empty_packet")
+        else if (args.Length >= 1 && args[0] == "receive_bounds")
         {
-            RunEmptyPacket();
+            RunReceiveBounds();
             result = 0;
         }
         else if (args.Length >= 1 && args[0] == "config_refusal")
@@ -989,18 +882,13 @@ internal static class Program
             RunHardening();
             result = 0;
         }
-        else if (args.Length >= 1 && args[0] == "byte_budget")
-        {
-            RunByteBudget();
-            result = 0;
-        }
         else if (args.Length >= 4 && args[0] == "scenario")
         {
             result = RunScenario(args[1], ulong.Parse(args[2]), int.Parse(args[3]));
         }
         else
         {
-            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat empty_packet | Compat config_refusal | Compat hardening | Compat byte_budget | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
+            Console.Error.WriteLine("usage: Compat vectors | Compat malformed | Compat receive_bounds | Compat config_refusal | Compat hardening | Compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>");
             result = 2;
         }
 

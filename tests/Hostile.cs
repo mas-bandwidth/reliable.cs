@@ -207,6 +207,26 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // a first fragment advances the received-packet window when its reassembly
+    // entry is created, as the C library does (reliable_endpoint_receive_packet
+    // calls reliable_sequence_buffer_advance on received_packets there): a
+    // packet older than the window behind that fragment is stale
+
+    private static void TestFragmentAdvancesReceivedWindow()
+    {
+        Endpoint sink = MakeSink(out Func<int> processed);
+        sink.ReceivePacket(BuildFragment(512, 1, 2, 0, 0, 0));
+        Check(sink.FragmentReassemblyExists(512), "first fragment at 512 held for reassembly");
+        Check(sink.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "first fragment at 512 accepted");
+
+        byte[] genuine = new byte[Wire.MaxPacketHeaderBytes + 1];
+        int genuineBytes = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
+        sink.ReceivePacket(genuine.AsSpan(0, genuineBytes + 1));
+        Check(sink.GetCounter(EndpointCounter.NumPacketsStale) == 1, "sequence 0 is stale behind the window advanced to 512");
+        Check(processed() == 0, "a stale packet is not processed");
+    }
+
+    // ------------------------------------------------------------
     // parser fuzz: random bytes through both header parsers, no exceptions ever
 
     private static void TestHostileParserFuzz()

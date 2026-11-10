@@ -119,10 +119,6 @@ connection: a client has one, a server has one per client slot.
 - **Fragmentation amplifies loss by design**: one lost fragment loses the whole
   packet. Callers needing large reliable blocks should build block transfer
   above this rather than sending very large packets.
-- **Unfinished reassemblies are bounded by a byte budget**: `FragmentReassemblyByteBudget`
-  (256 KB by default; `0` = unbounded, the old behaviour) caps the bytes held by
-  in-progress reassemblies. A first fragment whose buffer would push the total
-  past the budget is refused and counted `NumFragmentsInvalid`.
 - **Continuous bidirectional exchange is assumed** (~60HZ both ways): acks
   piggyback on outgoing packets, and there are no keepalives because there are
   never lulls. The rtt/jitter/loss stats are fresh under the same assumption.
@@ -138,15 +134,25 @@ C# programmer would expect. The differences, all recorded in
 - The C library's debug-only configuration asserts are construction-time
   `ArgumentException`s here — validated once, at `new Endpoint(...)`, never
   per packet. That includes the send path's fragment-count assert, checked at
-  construction as "MaxFragments must cover MaxPacketSize". The three sequence
-  buffers (`SentPacketsBufferSize`, `ReceivedPacketsBufferSize`,
-  `FragmentReassemblyBufferSize`) must each be a power of two no larger than
-  16384, and the C reference's other bounds hold too (fragment_above may not
-  exceed max_packet_size; max_fragments * fragment_size, max_packet_size and
-  packet_header_size + max_packet_size are each checked against INT_MAX).
+  construction as "MaxFragments must cover MaxPacketSize". The C reference's
+  other bounds hold too (fragment_above may not exceed max_packet_size;
+  max_fragments * fragment_size, max_packet_size and packet_header_size +
+  max_packet_size are each checked against INT_MAX).
+- Three bounds go beyond the pinned C release (`v1.4.5`). The
+  unit tests pin them; the interop gate feeds only inputs on which both
+  implementations agree:
+  - The three sequence buffers (`SentPacketsBufferSize`,
+    `ReceivedPacketsBufferSize`, `FragmentReassemblyBufferSize`) must each be
+    a power of two no larger than 16384 (C requires only a positive size).
+  - Unfinished reassemblies are bounded by `FragmentReassemblyByteBudget`
+    (256 KB by default; `0` = unbounded, the C release's behaviour). A first
+    fragment whose buffer would push the bytes held by in-progress
+    reassemblies past the budget is refused and counted `NumFragmentsInvalid`.
+  - An empty receive is counted invalid and dropped (C asserts
+    `packet_bytes > 0` on receive).
 - An empty send throws (the C library asserts `packet_bytes > 0` on send).
-  An empty receive is hostile input: it is counted invalid and dropped, and
-  it does not throw. Oversized payloads are dropped and counted, exactly like C.
+  An empty receive is hostile input and never throws (above). Oversized
+  payloads are dropped and counted, exactly like C.
 - `ProcessPacket` receives a read-only span (the C callback gets a mutable
   pointer); copy if you need to mutate.
 - No `Dispose`: the endpoint owns no unmanaged resources. `Reset()` matches
