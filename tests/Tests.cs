@@ -74,6 +74,7 @@ internal static partial class Tests
         RunTest("test_packets", TestPackets);
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
+        RunTest("test_sequence_wrap_arithmetic", TestSequenceWrapArithmetic);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
@@ -829,6 +830,55 @@ internal static partial class Tests
 
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ushort)numPacketsSent, "received counter across rollover");
         Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "no invalid fragments across rollover");
+    }
+
+    // ------------------------------------------------------------
+    // test_sequence_wrap_arithmetic: 16 bit sequence arithmetic is modular at
+    // sequence 0 and across 65535 -> 0, whether or not the build checks overflow
+
+    private static void TestSequenceWrapArithmetic()
+    {
+        // sequence buffer at sequence 0, then walked across the wrap
+        SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(TestSequenceBufferSize);
+        Check(sequenceBuffer.TestInsert(0), "test insert at sequence 0");
+        sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+        Check(ack == 0xFFFF && ackBits == 0, "ack bits at sequence 0");
+        for (int i = 65500; i < 65536 + 40; ++i)
+        {
+            ushort sequence = unchecked((ushort)i);
+            Check(sequenceBuffer.Insert(sequence) >= 0, "insert across wrap");
+            sequenceBuffer.Advance(sequence);
+            sequenceBuffer.InsertWithCleanup(sequence, _ => { });
+            sequenceBuffer.AdvanceWithCleanup(sequence, _ => { });
+        }
+        sequenceBuffer.GenerateAckBits(out ack, out ackBits);
+        Check(ack == 39 && ackBits == 0xFFFFFFFF, "ack bits across wrap");
+
+        // packet header whose ack is behind the sequence across the wrap
+        Span<byte> packetData = stackalloc byte[Wire.MaxPacketHeaderBytes];
+        int bytesWritten = Wire.WritePacketHeader(packetData, 3, 65534, 0xFFFFFFFF);
+        int bytesRead = Wire.ReadPacketHeader("test_sequence_wrap_arithmetic", packetData.Slice(0, bytesWritten), out ushort readSequence, out ushort readAck, out uint readAckBits);
+        Check(bytesRead == bytesWritten && readSequence == 3 && readAck == 65534 && readAckBits == 0xFFFFFFFF, "packet header across wrap");
+
+        // endpoints sending from sequence 0 through 65535 -> 0
+        double time = 100.0;
+        TestContext context = new TestContext();
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+        byte[] dummyPacket = new byte[8];
+        for (int i = 0; i < 65536 + 64; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.SendPacket(dummyPacket);
+            if ((i & 1023) == 0)
+            {
+                context.Sender.Update(time);
+                context.Receiver.Update(time);
+                time += 0.01;
+            }
+        }
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == 65536 + 64, "every packet received across wrap");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "no stale packets across wrap");
     }
 
     // ------------------------------------------------------------
