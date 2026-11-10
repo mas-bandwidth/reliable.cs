@@ -64,6 +64,7 @@ internal static partial class Tests
 
         // the C suite, test for test
         RunTest("test_sequence_buffer", TestSequenceBuffer);
+        RunTest("test_sequence_buffer_wrap_sizes", TestSequenceBufferWrapSizes);
         RunTest("test_generate_ack_bits", TestGenerateAckBits);
         RunTest("test_packet_header", TestPacketHeader);
         RunTest("test_acks", TestAcks);
@@ -74,21 +75,40 @@ internal static partial class Tests
         RunTest("test_packets", TestPackets);
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
+        RunTest("test_sequence_wrap", TestSequenceWrap);
+        RunTest("test_sequence_wrap_arithmetic", TestSequenceWrapArithmetic);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
+        RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
+        RunTest("test_packet_loss_estimator", TestPacketLossEstimator);
+        RunTest("test_jitter_estimator", TestJitterEstimator);
+        RunTest("test_bandwidth_estimators", TestBandwidthEstimators);
         RunTest("test_endpoint_reset", TestEndpointReset);
         RunTest("test_smoothing_factor_range", TestSmoothingFactorRange);
+        RunTest("test_endpoint_create_invalid_config", TestEndpointCreateInvalidConfig);
+        RunTest("test_fragment_counts", TestFragmentCounts);
+        RunTest("test_truncated_packets", TestTruncatedPackets);
+        RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
+        RunTest("test_rtt_min_large", TestRttMinLarge);
+        RunTest("test_rtt_clamped_when_time_steps_back", TestRttClampedWhenTimeStepsBack);
 
-        // golden wire pins, generated from the real C library (v1.4.0)
+        // golden wire pins, generated from the real C library (v1.4.0; the
+        // interop vectors gate shows the pinned v1.4.5 emits the same bytes)
         RunTest("test_golden_packet_headers", TestGoldenPacketHeaders);
         RunTest("test_golden_fragments", TestGoldenFragments);
 
         // C#-specific: hostile input, API misuse, allocation discipline
         RunTest("test_hostile_truncated_headers", TestHostileTruncatedHeaders);
         RunTest("test_hostile_fragments", TestHostileFragments);
+        RunTest("test_fragment_advances_received_window", TestFragmentAdvancesReceivedWindow);
+        RunTest("test_two_fragment_packet_reassembles", TestTwoFragmentPacketReassembles);
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
+        RunTest("test_receive_empty_packet_is_counted_invalid", TestReceiveEmptyPacketIsCountedInvalid);
         RunTest("test_config_validation", TestConfigValidation);
+        RunTest("test_config_refuses_bad_sequence_buffer_sizes", TestConfigRefusesBadSequenceBufferSizes);
+        RunTest("test_config_refuses_the_c_bounds", TestConfigRefusesTheCBounds);
+        RunTest("test_reassembly_buffer_is_zeroed", TestReassemblyBufferIsZeroed);
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
 
@@ -238,6 +258,137 @@ internal static partial class Tests
         }
     }
 
+    private sealed class SequenceBufferReferenceModel
+    {
+        private readonly ushort?[] _entries;
+
+        internal ushort Sequence;
+
+        internal SequenceBufferReferenceModel(int numEntries)
+        {
+            _entries = new ushort?[numEntries];
+        }
+
+        internal bool TestInsert(ushort sequence)
+        {
+            return !Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length));
+        }
+
+        internal int Insert(ushort sequence)
+        {
+            if (Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length)))
+            {
+                return -1;
+            }
+
+            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+            {
+                RemoveEntries(Sequence, sequence);
+                Sequence = (ushort)(sequence + 1);
+            }
+
+            int index = sequence % _entries.Length;
+            _entries[index] = sequence;
+            return index;
+        }
+
+        internal void Advance(ushort sequence)
+        {
+            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+            {
+                RemoveEntries(Sequence, sequence);
+                Sequence = (ushort)(sequence + 1);
+            }
+        }
+
+        internal void Remove(ushort sequence)
+        {
+            _entries[sequence % _entries.Length] = null;
+        }
+
+        internal int Find(ushort sequence)
+        {
+            int index = sequence % _entries.Length;
+            return _entries[index] == sequence ? index : -1;
+        }
+
+        private void RemoveEntries(ushort startSequence, ushort finishSequence)
+        {
+            int start = startSequence;
+            int finish = finishSequence;
+
+            if (finish < start)
+            {
+                finish += 65536;
+            }
+
+            if (finish - start < _entries.Length)
+            {
+                for (int sequence = start; sequence <= finish; ++sequence)
+                {
+                    _entries[(ushort)sequence % _entries.Length] = null;
+                }
+            }
+            else
+            {
+                Array.Clear(_entries, 0, _entries.Length);
+            }
+        }
+    }
+
+    private static void TestSequenceBufferWrapSizes()
+    {
+        int[] capacities = { 4, 3 };
+        ushort[] sequences = { 65534, 65535, 0, 1 };
+        ushort[] probes = { 65533, 65534, 65535, 0, 1, 2 };
+
+        foreach (int capacity in capacities)
+        {
+            SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(capacity);
+            SequenceBufferReferenceModel model = new SequenceBufferReferenceModel(capacity);
+
+            sequenceBuffer.Advance(65533);
+            model.Advance(65533);
+            Check(sequenceBuffer.Sequence == model.Sequence, $"capacity {capacity}: sequence after advance");
+
+            foreach (ushort sequence in sequences)
+            {
+                Check(sequenceBuffer.TestInsert(sequence) == model.TestInsert(sequence),
+                    $"capacity {capacity}: test insert {sequence}");
+
+                int index = sequenceBuffer.Insert(sequence);
+                int expectedIndex = model.Insert(sequence);
+
+                Check(index == expectedIndex, $"capacity {capacity}: insert {sequence} returned {index}, expected {expectedIndex}");
+                Check(sequenceBuffer.Sequence == model.Sequence,
+                    $"capacity {capacity}: sequence after insert {sequence} is {sequenceBuffer.Sequence}, expected {model.Sequence}");
+
+                if (index >= 0)
+                {
+                    sequenceBuffer.EntryAt(index).Sequence = sequence;
+                }
+
+                foreach (ushort probe in probes)
+                {
+                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
+                        $"capacity {capacity}: find {probe} after insert {sequence}");
+                }
+            }
+
+            foreach (ushort sequence in sequences)
+            {
+                sequenceBuffer.RemoveWithCleanup(sequence, _ => { });
+                model.Remove(sequence);
+
+                foreach (ushort probe in probes)
+                {
+                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
+                        $"capacity {capacity}: find {probe} after remove {sequence}");
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------
     // test_generate_ack_bits
 
@@ -353,6 +504,9 @@ internal static partial class Tests
 
     private const int TestAcksNumIterations = 256;
 
+    // the last 32 packets may not be acked yet when the loop ends
+    private const int TestAcksNumChecked = TestAcksNumIterations - 32;
+
     private static void TestAcks()
     {
         double time = 100.0;
@@ -386,7 +540,7 @@ internal static partial class Tests
                 senderAckedPacket[senderAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(senderAckedPacket[i], $"sender packet {i} must be acked");
         }
@@ -400,7 +554,7 @@ internal static partial class Tests
                 receiverAckedPacket[receiverAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(receiverAckedPacket[i], $"receiver packet {i} must be acked");
         }
@@ -444,7 +598,7 @@ internal static partial class Tests
                 senderAckedPacket[senderAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(senderAckedPacket[i] == (((i + 1) % 2) != 0), $"sender packet {i} ack state");
         }
@@ -458,7 +612,7 @@ internal static partial class Tests
                 receiverAckedPacket[receiverAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(receiverAckedPacket[i] == (((i + 1) % 2) != 0), $"receiver packet {i} ack state");
         }
@@ -675,15 +829,20 @@ internal static partial class Tests
         }
     }
 
+    private const int TestPacketsNumIterations = 16;
+
     private static void TestPackets()
     {
         double time = 100.0;
 
         TestContext context = new TestContext();
 
+        int[] numProcessed = new int[2];
+
         ProcessPacketCallback validateProcess = (id, sequence, packetData) =>
         {
             ValidatePacketData(packetData);
+            numProcessed[id]++;
             return true;
         };
 
@@ -702,7 +861,7 @@ internal static partial class Tests
 
         byte[] packetData = new byte[TestMaxPacketBytes];
 
-        for (int i = 0; i < 16; ++i)
+        for (int i = 0; i < TestPacketsNumIterations; ++i)
         {
             {
                 ushort sequence = context.Sender.NextPacketSequence;
@@ -711,9 +870,9 @@ internal static partial class Tests
             }
 
             {
-                ushort sequence = context.Sender.NextPacketSequence;
+                ushort sequence = context.Receiver.NextPacketSequence;
                 int packetBytes = GeneratePacketData(sequence, packetData);
-                context.Sender.SendPacket(packetData.AsSpan(0, packetBytes));
+                context.Receiver.SendPacket(packetData.AsSpan(0, packetBytes));
             }
 
             context.Sender.Update(time);
@@ -724,6 +883,9 @@ internal static partial class Tests
 
             time += deltaTime;
         }
+
+        Check(numProcessed[0] == TestPacketsNumIterations, $"sender processed {numProcessed[0]}, expected {TestPacketsNumIterations}");
+        Check(numProcessed[1] == TestPacketsNumIterations, $"receiver processed {numProcessed[1]}, expected {TestPacketsNumIterations}");
     }
 
     // ------------------------------------------------------------
@@ -818,6 +980,118 @@ internal static partial class Tests
         Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "no invalid fragments across rollover");
     }
 
+    private static void TestSequenceWrap()
+    {
+        const int numPackets = 65536 + 4;
+
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        int numProcessed = 0;
+
+        ProcessPacketCallback validate = (id, sequence, packetData) =>
+        {
+            Check(packetData.Length == 8, $"wrap: payload size at sequence {sequence}");
+            Check(sequence == (ushort)numProcessed, $"wrap: delivered sequence {sequence}, expected {(ushort)numProcessed}");
+            numProcessed++;
+            return true;
+        };
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.ProcessPacket = validate;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        byte[] packetData = new byte[8];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            Check(context.Sender.NextPacketSequence == (ushort)i,
+                $"wrap: next sequence {context.Sender.NextPacketSequence}, expected {(ushort)i}");
+            context.Sender.SendPacket(packetData);
+        }
+
+        Check(context.Sender.NextPacketSequence == unchecked((ushort)numPackets), "wrap: next sequence after the walk");
+        Check(numProcessed == numPackets, $"wrap: processed {numProcessed}, expected {numPackets}");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ulong)numPackets,
+            "wrap: received counter");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsInvalid) == 0, "wrap: no invalid packets");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "wrap: no stale packets");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsDuplicate) == 0, "wrap: no duplicate packets");
+
+        context.Receiver.SendPacket(packetData);
+
+        bool sawAckBeforeWrap = false;
+        bool sawAckAfterWrap = false;
+        foreach (ushort ack in context.Sender.GetAcks())
+        {
+            if (ack == 65535)
+            {
+                sawAckBeforeWrap = true;
+            }
+            if (ack == 0)
+            {
+                sawAckAfterWrap = true;
+            }
+        }
+
+        Check(sawAckBeforeWrap, "wrap: ack for sequence 65535");
+        Check(sawAckAfterWrap, "wrap: ack for sequence 0");
+        Check(context.Sender.GetCounter(EndpointCounter.NumPacketsAcked) > 0, "wrap: sender recorded acks");
+    }
+
+    // ------------------------------------------------------------
+    // test_sequence_wrap_arithmetic: 16 bit sequence arithmetic is modular at
+    // sequence 0 and across 65535 -> 0, whether or not the build checks overflow
+
+    private static void TestSequenceWrapArithmetic()
+    {
+        // sequence buffer at sequence 0, then walked across the wrap
+        SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(TestSequenceBufferSize);
+        Check(sequenceBuffer.TestInsert(0), "test insert at sequence 0");
+        sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+        Check(ack == 0xFFFF && ackBits == 0, "ack bits at sequence 0");
+        for (int i = 65500; i < 65536 + 40; ++i)
+        {
+            ushort sequence = unchecked((ushort)i);
+            Check(sequenceBuffer.Insert(sequence) >= 0, "insert across wrap");
+            sequenceBuffer.Advance(sequence);
+            sequenceBuffer.InsertWithCleanup(sequence, _ => { });
+            sequenceBuffer.AdvanceWithCleanup(sequence, _ => { });
+        }
+        sequenceBuffer.GenerateAckBits(out ack, out ackBits);
+        Check(ack == 39 && ackBits == 0xFFFFFFFF, "ack bits across wrap");
+
+        // packet header whose ack is behind the sequence across the wrap
+        Span<byte> packetData = stackalloc byte[Wire.MaxPacketHeaderBytes];
+        int bytesWritten = Wire.WritePacketHeader(packetData, 3, 65534, 0xFFFFFFFF);
+        int bytesRead = Wire.ReadPacketHeader("test_sequence_wrap_arithmetic", packetData.Slice(0, bytesWritten), out ushort readSequence, out ushort readAck, out uint readAckBits);
+        Check(bytesRead == bytesWritten && readSequence == 3 && readAck == 65534 && readAckBits == 0xFFFFFFFF, "packet header across wrap");
+
+        // endpoints sending from sequence 0 through 65535 -> 0
+        double time = 100.0;
+        TestContext context = new TestContext();
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+        byte[] dummyPacket = new byte[8];
+        for (int i = 0; i < 65536 + 64; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.SendPacket(dummyPacket);
+            if ((i & 1023) == 0)
+            {
+                context.Sender.Update(time);
+                context.Receiver.Update(time);
+                time += 0.01;
+            }
+        }
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == 65536 + 64, "every packet received across wrap");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "no stale packets across wrap");
+    }
+
     // ------------------------------------------------------------
     // test_fragment_cleanup
 
@@ -878,12 +1152,51 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // test_unfinished_reassembly_respects_byte_budget
+
+    private static void TestUnfinishedReassemblyRespectsByteBudget()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentReassemblyByteBudget = 64 * 1024;
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        const int numFragments = 16;
+        int slotBytes = Wire.MaxPacketHeaderBytes + numFragments * receiverConfig.FragmentSize + 8;
+        int byteBudget = 64 * 1024;
+
+        // 64 last fragments for sequences 0..63, each claiming 16 fragments, with
+        // fragment 0 never arriving. every one is a first fragment for its packet
+        // and would allocate a full slot.
+        for (int sequence = 0; sequence < 64; ++sequence)
+        {
+            byte[] fragment = BuildFragment((ushort)sequence, numFragments - 1, numFragments, 1024, 0, 0);
+            context.Receiver.ReceivePacket(fragment);
+            Check(context.Receiver.OutstandingReassemblyBytes <= byteBudget + slotBytes,
+                $"outstanding reassembly bytes {context.Receiver.OutstandingReassemblyBytes} exceed budget + slot after sequence {sequence}");
+        }
+
+        Check(context.Receiver.OutstandingReassemblyBytes >= slotBytes, "the endpoint allocated at least one slot's worth of bytes");
+
+        context.Receiver.Reset();
+        Check(context.Receiver.OutstandingReassemblyBytes == 0, "outstanding reassembly bytes return to zero after reset");
+        Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
+    }
+
+    // ------------------------------------------------------------
     // test_rtt
 
     private static void TestRtt()
     {
         double time = 100.0;
-        const double deltaTime = 0.01;
+        const double roundTripTime = 0.05;
+        const int numRoundTrips = 10;
+        const float expectedRtt = 50.0f;
 
         TestContext context = new TestContext();
 
@@ -892,25 +1205,168 @@ internal static partial class Tests
 
         byte[] dummyPacket = new byte[8];
 
-        for (int i = 0; i < 1000; ++i)
+        for (int i = 0; i < numRoundTrips; ++i)
         {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
             context.Sender.SendPacket(dummyPacket);
-            context.Receiver.SendPacket(dummyPacket);
+
+            time += roundTripTime;
 
             context.Sender.Update(time);
             context.Receiver.Update(time);
 
-            time += deltaTime;
+            context.Receiver.SendPacket(dummyPacket);
         }
+
+        context.Sender.Update(time);
 
         float rtt = context.Sender.Rtt;
         float rttMin = context.Sender.RttMin;
         float rttMax = context.Sender.RttMax;
         float rttAvg = context.Sender.RttAvg;
 
-        Check(!float.IsNaN(rtt) && rtt >= 0, "rtt is finite and non-negative");
-        Check(rttMin >= 0 && rttMin <= rttAvg && rttAvg <= rttMax, "rtt min <= avg <= max");
-        Check(rttMax < 1000.0f, "rtt is in milliseconds");
+        Check(Math.Abs(rtt - expectedRtt) < 0.01f, $"rtt is {rtt}, expected {expectedRtt}");
+        Check(Math.Abs(rttMin - expectedRtt) < 0.01f, $"rtt min is {rttMin}, expected {expectedRtt}");
+        Check(Math.Abs(rttMax - expectedRtt) < 0.01f, $"rtt max is {rttMax}, expected {expectedRtt}");
+        Check(Math.Abs(rttAvg - expectedRtt) < 0.01f, $"rtt avg is {rttAvg}, expected {expectedRtt}");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt) < 0.01f, "jitter average vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt) < 0.01f, "jitter max vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt) < 0.01f, "jitter stddev vs avg rtt is zero");
+    }
+
+    // ------------------------------------------------------------
+    // test_packet_loss_estimator
+
+    private static void TestPacketLossEstimator()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.PacketLossSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Drop = (i % 4) == 1;
+            context.Sender.SendPacket(dummyPacket);
+            context.Drop = false;
+            context.Receiver.SendPacket(dummyPacket);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+
+        float packetLoss = context.Sender.PacketLoss;
+
+        Check(Math.Abs(packetLoss - 25.0f) < 0.01f, $"packet loss is {packetLoss}, expected 25");
+    }
+
+    // ------------------------------------------------------------
+    // test_jitter_estimator
+
+    private static void TestJitterEstimator()
+    {
+        double time = 100.0;
+
+        float[] roundTripTimesMs = { 10.0f, 20.0f, 10.0f, 20.0f };
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        foreach (float roundTripTimeMs in roundTripTimesMs)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(dummyPacket);
+
+            time += roundTripTimeMs / 1000.0;
+
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Receiver.SendPacket(dummyPacket);
+        }
+
+        context.Sender.Update(time);
+
+        Check(Math.Abs(context.Sender.RttMin - 10.0f) < 0.01f, $"rtt min is {context.Sender.RttMin}, expected 10");
+        Check(Math.Abs(context.Sender.RttMax - 20.0f) < 0.01f, $"rtt max is {context.Sender.RttMax}, expected 20");
+        Check(Math.Abs(context.Sender.RttAvg - 15.0f) < 0.01f, $"rtt avg is {context.Sender.RttAvg}, expected 15");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt - 5.0f) < 0.01f, $"jitter average vs min rtt is {context.Sender.JitterAvgVsMinRtt}, expected 5");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt - 10.0f) < 0.01f, $"jitter max vs min rtt is {context.Sender.JitterMaxVsMinRtt}, expected 10");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt - 5.0f) < 0.01f, $"jitter stddev vs avg rtt is {context.Sender.JitterStddevVsAvgRtt}, expected 5");
+    }
+
+    // ------------------------------------------------------------
+    // test_bandwidth_estimators
+
+    private static void TestBandwidthEstimators()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+        const int packetHeaderSize = 28;
+        const int wireHeaderBytes = 8;
+        const int payloadBytes = 100;
+        const int windowSamples = numPackets / 2;
+        const double windowSeconds = (windowSamples - 1) * deltaTime;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.BandwidthSmoothingFactor = 1.0f;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.ReceivedPacketsBufferSize = numPackets;
+        receiverConfig.BandwidthSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        byte[] packet = new byte[payloadBytes];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(packet);
+            context.Receiver.SendPacket(packet);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+
+        float sentExpected = (float)(windowSamples * (packetHeaderSize + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float receivedExpected = (float)(windowSamples * (packetHeaderSize + wireHeaderBytes + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float ackedExpected = sentExpected;
+
+        Check(Math.Abs(context.Sender.SentBandwidthKbps - sentExpected) < 0.01f, $"sent bandwidth is {context.Sender.SentBandwidthKbps}, expected {sentExpected}");
+        Check(Math.Abs(context.Receiver.ReceivedBandwidthKbps - receivedExpected) < 0.01f, $"received bandwidth is {context.Receiver.ReceivedBandwidthKbps}, expected {receivedExpected}");
+        Check(Math.Abs(context.Sender.AckedBandwidthKbps - ackedExpected) < 0.01f, $"acked bandwidth is {context.Sender.AckedBandwidthKbps}, expected {ackedExpected}");
     }
 
     // ------------------------------------------------------------
@@ -995,6 +1451,9 @@ internal static partial class Tests
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) > 0, "packets received after reset");
     }
 
+    // ------------------------------------------------------------
+    // test_endpoint_create_invalid_config
+
     private static void TestSmoothingFactorRange()
     {
         static EndpointConfig Valid()
@@ -1021,7 +1480,6 @@ internal static partial class Tests
             Check(false, $"{what} must throw ArgumentOutOfRangeException");
         }
 
-        // a valid default config constructs
         _ = new Endpoint(Valid(), 0.0);
 
         float[] invalid = { -0.1f, 1.1f, float.NaN };
@@ -1033,7 +1491,6 @@ internal static partial class Tests
             MustThrow(c => c.BandwidthSmoothingFactor = value, $"BandwidthSmoothingFactor = {value}");
         }
 
-        // the inclusive bounds are accepted
         _ = new Endpoint(new EndpointConfig
         {
             TransmitPacket = (id, sequence, packetData) => { },
@@ -1042,6 +1499,380 @@ internal static partial class Tests
             PacketLossSmoothingFactor = 1.0f,
             BandwidthSmoothingFactor = 1.0f,
         }, 0.0);
+    }
+
+    private static void TestEndpointCreateInvalidConfig()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = s_acceptAll,
+            };
+        }
+
+        static void Refused(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must be refused");
+        }
+
+        static void Accepted(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                Check(false, $"{what} must be accepted");
+            }
+        }
+
+        Accepted(c => { }, "default config");
+
+        try
+        {
+            _ = new Endpoint(null!, 0.0);
+            Check(false, "null config must be refused");
+        }
+        catch (ArgumentNullException)
+        {
+        }
+
+        // the relationship between fragment count, fragment size and packet size
+
+        Refused(c => { c.MaxFragments = 4; c.FragmentSize = 1024; c.MaxPacketSize = 4 * 1024 + 1; }, "MaxFragments one short of MaxPacketSize");
+
+        // exactly covering is allowed
+
+        Accepted(c => { c.MaxFragments = 4; c.FragmentSize = 1024; c.MaxPacketSize = 4 * 1024; c.FragmentAbove = 1024; }, "MaxFragments exactly covering MaxPacketSize");
+
+        // ranges
+
+        Refused(c => c.MaxPacketSize = 0, "MaxPacketSize = 0");
+        Refused(c => c.FragmentAbove = 0, "FragmentAbove = 0");
+        Refused(c => c.FragmentSize = 0, "FragmentSize = 0");
+        Refused(c => c.MaxFragments = 0, "MaxFragments = 0");
+        Refused(c => c.MaxFragments = 257, "MaxFragments = 257");
+        Refused(c => c.AckBufferSize = 0, "AckBufferSize = 0");
+        Refused(c => c.SentPacketsBufferSize = -1, "SentPacketsBufferSize = -1");
+        Refused(c => c.ReceivedPacketsBufferSize = 0, "ReceivedPacketsBufferSize = 0");
+        Refused(c => c.FragmentReassemblyBufferSize = 0, "FragmentReassemblyBufferSize = 0");
+        Refused(c => c.RttHistorySize = 0, "RttHistorySize = 0");
+        Refused(c => c.TransmitPacket = null, "TransmitPacket = null");
+        Refused(c => c.ProcessPacket = null, "ProcessPacket = null");
+
+        // the smoothing factor boundaries 0 and 1 are accepted
+
+        Accepted(c => { c.RttSmoothingFactor = 0.0f; c.PacketLossSmoothingFactor = 0.0f; c.BandwidthSmoothingFactor = 0.0f; }, "smoothing factors 0");
+        Accepted(c => { c.RttSmoothingFactor = 1.0f; c.PacketLossSmoothingFactor = 1.0f; c.BandwidthSmoothingFactor = 1.0f; }, "smoothing factors 1");
+
+        // the largest sequence buffer sizes create an endpoint pair that still sends and receives
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = 16384;
+        senderConfig.ReceivedPacketsBufferSize = 16384;
+        senderConfig.FragmentReassemblyBufferSize = 16384;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.SentPacketsBufferSize = 16384;
+        receiverConfig.ReceivedPacketsBufferSize = 16384;
+        receiverConfig.FragmentReassemblyBufferSize = 16384;
+
+        context.Sender = new Endpoint(senderConfig, 0.0);
+        context.Receiver = new Endpoint(receiverConfig, 0.0);
+
+        context.Sender.SendPacket(new byte[8]);
+
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == 1, "largest buffer sizes still deliver");
+    }
+
+    // ------------------------------------------------------------
+    // test_fragment_counts
+
+    private static void TestFragmentCase(int fragmentSize, int maxFragments, int packetBytes, int expectedFragments)
+    {
+        TestContext context = new TestContext();
+
+        int numProcessed = 0;
+        byte[] processed = Array.Empty<byte>();
+
+        ProcessPacketCallback capture = (id, sequence, packetData) =>
+        {
+            numProcessed++;
+            processed = packetData.ToArray();
+            return true;
+        };
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.FragmentSize = fragmentSize;
+        senderConfig.MaxFragments = maxFragments;
+        senderConfig.MaxPacketSize = fragmentSize * maxFragments;
+        senderConfig.FragmentAbove = fragmentSize;
+        senderConfig.ProcessPacket = capture;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentSize = fragmentSize;
+        receiverConfig.MaxFragments = maxFragments;
+        receiverConfig.MaxPacketSize = fragmentSize * maxFragments;
+        receiverConfig.FragmentAbove = fragmentSize;
+        receiverConfig.ProcessPacket = capture;
+
+        context.Sender = new Endpoint(senderConfig, 100.0);
+        context.Receiver = new Endpoint(receiverConfig, 100.0);
+
+        byte[] packet = new byte[packetBytes];
+        for (int i = 0; i < packetBytes; ++i)
+        {
+            packet[i] = (byte)((i * 31) + 7);
+        }
+
+        context.Sender.SendPacket(packet);
+
+        string what = $"fragment case ({fragmentSize}, {maxFragments}, {packetBytes})";
+
+        Check(numProcessed == 1, $"{what}: processed {numProcessed}, expected 1");
+        Check(processed.Length == packetBytes, $"{what}: processed {processed.Length} bytes");
+        Check(processed.AsSpan().SequenceEqual(packet), $"{what}: processed bytes differ");
+
+        ulong fragmentsSent = context.Sender.GetCounter(EndpointCounter.NumFragmentsSent);
+        ulong fragmentsReceived = context.Receiver.GetCounter(EndpointCounter.NumFragmentsReceived);
+
+        Check(fragmentsSent == (ulong)expectedFragments, $"{what}: {fragmentsSent} fragments sent, expected {expectedFragments}");
+        Check(fragmentsReceived == (ulong)expectedFragments, $"{what}: {fragmentsReceived} fragments received, expected {expectedFragments}");
+    }
+
+    private static void TestFragmentCounts()
+    {
+        // an exact multiple of the fragment size, where the last fragment is full rather than a remainder
+        TestFragmentCase(512, 16, 512 * 4, 4);
+
+        // the largest packet the config allows, again an exact multiple
+        TestFragmentCase(512, 16, 512 * 16, 16);
+
+        // above the threshold by a single byte, and around the next boundary
+        TestFragmentCase(512, 16, 513, 2);
+        TestFragmentCase(512, 16, 1023, 2);
+        TestFragmentCase(512, 16, 1025, 3);
+        TestFragmentCase(64, 256, 65, 2);
+
+        // 256 fragments, the maximum the wire format can express
+        TestFragmentCase(64, 256, 64 * 256, 256);
+        TestFragmentCase(64, 256, 64 * 255 + 1, 256);
+
+        // at or below the threshold the packet is not fragmented
+        TestFragmentCase(512, 16, 512, 0);
+        TestFragmentCase(512, 16, 1, 0);
+    }
+
+    // ------------------------------------------------------------
+    // test_truncated_packets
+
+    private static void TestTruncatedPackets()
+    {
+        int numProcessed = 0;
+        System.Collections.Generic.List<byte[]> captured = new System.Collections.Generic.List<byte[]>();
+
+        EndpointConfig MakeConfig(string name)
+        {
+            return new EndpointConfig
+            {
+                Name = name,
+                FragmentSize = 256,
+                MaxFragments = 16,
+                MaxPacketSize = 256 * 16,
+                FragmentAbove = 256,
+                TransmitPacket = (id, sequence, packetData) => captured.Add(packetData.ToArray()),
+                ProcessPacket = (id, sequence, packetData) => { numProcessed++; return true; },
+            };
+        }
+
+        Endpoint sender = new Endpoint(MakeConfig("sender"), 100.0);
+        Endpoint receiver = new Endpoint(MakeConfig("receiver"), 100.0);
+
+        // an unfragmented packet, captured on the wire
+
+        byte[] packet = new byte[200];
+        packet.AsSpan().Fill(0xAB);
+        sender.SendPacket(packet);
+        Check(captured.Count == 1, "one packet captured");
+
+        // every truncation of it shorter than the header is rejected, and none is processed
+
+        for (int truncatedBytes = 1; truncatedBytes < 4; ++truncatedBytes)
+        {
+            receiver.ReceivePacket(captured[0].AsSpan(0, truncatedBytes));
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumPacketsInvalid) == 3, "truncated headers counted invalid");
+        Check(numProcessed == 0, "no truncated packet processed");
+
+        // the whole packet still arrives
+
+        receiver.ReceivePacket(captured[0]);
+        Check(numProcessed == 1, "whole packet processed");
+
+        // now a fragmented packet
+
+        captured.Clear();
+
+        byte[] largePacket = new byte[1024];
+        largePacket.AsSpan().Fill(0xCD);
+        sender.SendPacket(largePacket);
+        Check(captured.Count == 4, "four fragments captured");
+
+        // a fragment truncated inside its header is rejected
+
+        for (int truncatedBytes = 1; truncatedBytes < Wire.FragmentHeaderBytes; ++truncatedBytes)
+        {
+            receiver.ReceivePacket(captured[1].AsSpan(0, truncatedBytes));
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 0, "no truncated fragment received");
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == (ulong)(Wire.FragmentHeaderBytes - 1), "truncated fragment headers counted invalid");
+
+        // a fragment that is not the last one must carry exactly FragmentSize bytes,
+        // so a truncated body is rejected too
+
+        receiver.ReceivePacket(captured[1].AsSpan(0, captured[1].Length - 1));
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 0, "truncated fragment body not received");
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == (ulong)Wire.FragmentHeaderBytes, "truncated fragment body counted invalid");
+        Check(numProcessed == 1, "truncated fragment not processed");
+
+        // the intact fragments reassemble
+
+        for (int i = 0; i < captured.Count; ++i)
+        {
+            receiver.ReceivePacket(captured[i]);
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 4, "all four fragments received");
+        Check(numProcessed == 2, "fragmented packet processed");
+    }
+
+    // ------------------------------------------------------------
+    // test_endpoint_reset_clears_stats: reset zeroes every statistic getter
+
+    private static void TestEndpointResetClearsStats()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < 32; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.Update(time);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+        }
+
+        // stats accumulate before reset
+        Check(context.Sender.Rtt > 0.0f, "rtt accumulates before reset");
+
+        context.Sender.Reset();
+        context.Receiver.Reset();
+
+        Check(context.Sender.Rtt == 0.0f, "rtt cleared by reset");
+        Check(context.Sender.RttMin == 0.0f, "rtt_min cleared by reset");
+        Check(context.Sender.RttMax == 0.0f, "rtt_max cleared by reset");
+        Check(context.Sender.RttAvg == 0.0f, "rtt_avg cleared by reset");
+        Check(context.Sender.JitterAvgVsMinRtt == 0.0f, "jitter_avg cleared by reset");
+        Check(context.Sender.JitterMaxVsMinRtt == 0.0f, "jitter_max cleared by reset");
+        Check(context.Sender.JitterStddevVsAvgRtt == 0.0f, "jitter_stddev cleared by reset");
+        Check(context.Sender.PacketLoss == 0.0f, "packet_loss cleared by reset");
+        Check(context.Sender.SentBandwidthKbps == 0.0f, "sent_kbps cleared by reset");
+        Check(context.Sender.ReceivedBandwidthKbps == 0.0f, "received_kbps cleared by reset");
+        Check(context.Sender.AckedBandwidthKbps == 0.0f, "acked_kbps cleared by reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_min_large: the rtt minimum is decided by a sample count, not a
+    // sentinel, so a minimum of 10000 ms or more is reported instead of 0
+
+    private static void TestRttMinLarge()
+    {
+        double time = 0.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        double[] rttSeconds = { 10.0, 12.0, 20.0 };
+        foreach (double rtt in rttSeconds)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            time += rtt;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+
+            context.Sender.ClearAcks();
+            context.Receiver.ClearAcks();
+        }
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin == 10000.0f, "rtt_min reports 10000 ms when all samples are 10000 ms or more");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_clamped_when_time_steps_back: an ack processed after the
+    // caller's clock moved backwards gives an rtt sample of 0, never negative
+
+    private static void TestRttClampedWhenTimeStepsBack()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        context.Sender.SendPacket(dummyPacket);
+
+        time -= 1.0;
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+        context.Receiver.SendPacket(dummyPacket);
+
+        Check(context.Sender.GetAcks().Length == 1, "the packet is acked");
+        Check(context.Sender.Rtt >= 0.0f, "rtt stays non-negative when time steps back");
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin >= 0.0f, "rtt_min stays non-negative when time steps back");
+        Check(context.Sender.RttAvg >= 0.0f, "rtt_avg stays non-negative when time steps back");
     }
 
     // ------------------------------------------------------------
