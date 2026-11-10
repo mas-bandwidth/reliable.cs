@@ -1191,7 +1191,7 @@ public sealed class Endpoint
 
                                     float rtt = (float)(_time - sentPacketData.Time) * 1000.0f;
 
-                                    Debug.Assert(rtt >= 0.0);
+                                    if (rtt < 0.0f) rtt = 0.0f;
 
                                     int index = ackSequence % _rttHistorySize;
 
