@@ -64,6 +64,7 @@ internal static partial class Tests
 
         // the C suite, test for test
         RunTest("test_sequence_buffer", TestSequenceBuffer);
+        RunTest("test_sequence_buffer_wrap_sizes", TestSequenceBufferWrapSizes);
         RunTest("test_generate_ack_bits", TestGenerateAckBits);
         RunTest("test_packet_header", TestPacketHeader);
         RunTest("test_acks", TestAcks);
@@ -74,6 +75,7 @@ internal static partial class Tests
         RunTest("test_packets", TestPackets);
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
+        RunTest("test_sequence_wrap", TestSequenceWrap);
         RunTest("test_sequence_wrap_arithmetic", TestSequenceWrapArithmetic);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
@@ -252,6 +254,137 @@ internal static partial class Tests
         for (int i = 0; i < TestSequenceBufferSize; ++i)
         {
             Check(sequenceBuffer.Find((ushort)i) == -1, $"find({i}) after reset");
+        }
+    }
+
+    private sealed class SequenceBufferReferenceModel
+    {
+        private readonly ushort?[] _entries;
+
+        internal ushort Sequence;
+
+        internal SequenceBufferReferenceModel(int numEntries)
+        {
+            _entries = new ushort?[numEntries];
+        }
+
+        internal bool TestInsert(ushort sequence)
+        {
+            return !Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length));
+        }
+
+        internal int Insert(ushort sequence)
+        {
+            if (Seq.LessThan(sequence, (ushort)(Sequence - (ushort)_entries.Length)))
+            {
+                return -1;
+            }
+
+            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+            {
+                RemoveEntries(Sequence, sequence);
+                Sequence = (ushort)(sequence + 1);
+            }
+
+            int index = sequence % _entries.Length;
+            _entries[index] = sequence;
+            return index;
+        }
+
+        internal void Advance(ushort sequence)
+        {
+            if (Seq.GreaterThan((ushort)(sequence + 1), Sequence))
+            {
+                RemoveEntries(Sequence, sequence);
+                Sequence = (ushort)(sequence + 1);
+            }
+        }
+
+        internal void Remove(ushort sequence)
+        {
+            _entries[sequence % _entries.Length] = null;
+        }
+
+        internal int Find(ushort sequence)
+        {
+            int index = sequence % _entries.Length;
+            return _entries[index] == sequence ? index : -1;
+        }
+
+        private void RemoveEntries(ushort startSequence, ushort finishSequence)
+        {
+            int start = startSequence;
+            int finish = finishSequence;
+
+            if (finish < start)
+            {
+                finish += 65536;
+            }
+
+            if (finish - start < _entries.Length)
+            {
+                for (int sequence = start; sequence <= finish; ++sequence)
+                {
+                    _entries[(ushort)sequence % _entries.Length] = null;
+                }
+            }
+            else
+            {
+                Array.Clear(_entries, 0, _entries.Length);
+            }
+        }
+    }
+
+    private static void TestSequenceBufferWrapSizes()
+    {
+        int[] capacities = { 4, 3 };
+        ushort[] sequences = { 65534, 65535, 0, 1 };
+        ushort[] probes = { 65533, 65534, 65535, 0, 1, 2 };
+
+        foreach (int capacity in capacities)
+        {
+            SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(capacity);
+            SequenceBufferReferenceModel model = new SequenceBufferReferenceModel(capacity);
+
+            sequenceBuffer.Advance(65533);
+            model.Advance(65533);
+            Check(sequenceBuffer.Sequence == model.Sequence, $"capacity {capacity}: sequence after advance");
+
+            foreach (ushort sequence in sequences)
+            {
+                Check(sequenceBuffer.TestInsert(sequence) == model.TestInsert(sequence),
+                    $"capacity {capacity}: test insert {sequence}");
+
+                int index = sequenceBuffer.Insert(sequence);
+                int expectedIndex = model.Insert(sequence);
+
+                Check(index == expectedIndex, $"capacity {capacity}: insert {sequence} returned {index}, expected {expectedIndex}");
+                Check(sequenceBuffer.Sequence == model.Sequence,
+                    $"capacity {capacity}: sequence after insert {sequence} is {sequenceBuffer.Sequence}, expected {model.Sequence}");
+
+                if (index >= 0)
+                {
+                    sequenceBuffer.EntryAt(index).Sequence = sequence;
+                }
+
+                foreach (ushort probe in probes)
+                {
+                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
+                        $"capacity {capacity}: find {probe} after insert {sequence}");
+                }
+            }
+
+            foreach (ushort sequence in sequences)
+            {
+                sequenceBuffer.RemoveWithCleanup(sequence, _ => { });
+                model.Remove(sequence);
+
+                foreach (ushort probe in probes)
+                {
+                    Check(sequenceBuffer.Find(probe) == model.Find(probe),
+                        $"capacity {capacity}: find {probe} after remove {sequence}");
+                }
+            }
         }
     }
 
@@ -844,6 +977,69 @@ internal static partial class Tests
 
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ushort)numPacketsSent, "received counter across rollover");
         Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "no invalid fragments across rollover");
+    }
+
+    private static void TestSequenceWrap()
+    {
+        const int numPackets = 65536 + 4;
+
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        int numProcessed = 0;
+
+        ProcessPacketCallback validate = (id, sequence, packetData) =>
+        {
+            Check(packetData.Length == 8, $"wrap: payload size at sequence {sequence}");
+            Check(sequence == (ushort)numProcessed, $"wrap: delivered sequence {sequence}, expected {(ushort)numProcessed}");
+            numProcessed++;
+            return true;
+        };
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.ProcessPacket = validate;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        byte[] packetData = new byte[8];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            Check(context.Sender.NextPacketSequence == (ushort)i,
+                $"wrap: next sequence {context.Sender.NextPacketSequence}, expected {(ushort)i}");
+            context.Sender.SendPacket(packetData);
+        }
+
+        Check(context.Sender.NextPacketSequence == unchecked((ushort)numPackets), "wrap: next sequence after the walk");
+        Check(numProcessed == numPackets, $"wrap: processed {numProcessed}, expected {numPackets}");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ulong)numPackets,
+            "wrap: received counter");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsInvalid) == 0, "wrap: no invalid packets");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "wrap: no stale packets");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsDuplicate) == 0, "wrap: no duplicate packets");
+
+        context.Receiver.SendPacket(packetData);
+
+        bool sawAckBeforeWrap = false;
+        bool sawAckAfterWrap = false;
+        foreach (ushort ack in context.Sender.GetAcks())
+        {
+            if (ack == 65535)
+            {
+                sawAckBeforeWrap = true;
+            }
+            if (ack == 0)
+            {
+                sawAckAfterWrap = true;
+            }
+        }
+
+        Check(sawAckBeforeWrap, "wrap: ack for sequence 65535");
+        Check(sawAckAfterWrap, "wrap: ack for sequence 0");
+        Check(context.Sender.GetCounter(EndpointCounter.NumPacketsAcked) > 0, "wrap: sender recorded acks");
     }
 
     // ------------------------------------------------------------
