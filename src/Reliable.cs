@@ -746,7 +746,7 @@ public sealed class Endpoint
 
     // 256 received-fragment flags without a per-entry array: the C's
     // uint8_t fragment_received[256] as four inline bit words.
-    private struct FragmentReceivedBits
+    internal struct FragmentReceivedBits
     {
         private ulong _b0, _b1, _b2, _b3;
 
@@ -774,7 +774,7 @@ public sealed class Endpoint
         }
     }
 
-    private struct FragmentReassemblyData
+    internal struct FragmentReassemblyData
     {
         public int NumFragmentsReceived;
         public int NumFragmentsTotal;
@@ -1316,10 +1316,14 @@ public sealed class Endpoint
 
             if (ReliableLog.DebugEnabled) ReliableLog.Write($"[{_name}] received fragment {fragmentId} of packet {sequence} ({reassembly.NumFragmentsReceived + 1}/{numFragments})\n");
 
+            if (!StoreFragmentData(ref reassembly, sequence, ack, ackBits, fragmentId, _fragmentSize, packetData.Slice(fragmentHeaderBytes)))
+            {
+                if (ReliableLog.ErrorEnabled) ReliableLog.Write($"[{_name}] ignoring invalid fragment. could not store fragment data\n");
+                return;
+            }
+
             reassembly.NumFragmentsReceived++;
             reassembly.FragmentReceived.Set(fragmentId);
-
-            StoreFragmentData(ref reassembly, sequence, ack, ackBits, fragmentId, _fragmentSize, packetData.Slice(fragmentHeaderBytes));
 
             if (reassembly.NumFragmentsReceived == reassembly.NumFragmentsTotal)
             {
@@ -1343,7 +1347,7 @@ public sealed class Endpoint
     }
 
     // reliable_store_fragment_data
-    private static void StoreFragmentData(
+    internal static bool StoreFragmentData(
         ref FragmentReassemblyData reassembly,
         ushort sequence,
         ushort ack,
@@ -1381,10 +1385,11 @@ public sealed class Endpoint
         if (fragmentBytes < 0 || endOffset > maxSize)
         {
             if (ReliableLog.DebugEnabled) ReliableLog.Write($"[reliable] invalid fragment size {fragmentBytes} (would write past {endOffset}/{maxSize})\n");
-            return;
+            return false;
         }
 
         fragmentData.CopyTo(packetData.AsSpan(offset));
+        return true;
     }
 
     /// <summary>
