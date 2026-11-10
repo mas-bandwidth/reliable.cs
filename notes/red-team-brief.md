@@ -72,9 +72,9 @@ Behavior:
    reassembly eviction.
 9. Reported acks are exactly the C library's: only sequences actually sent, at
    most once each, ack-buffer overflow drops with later recovery.
-10. `Reset()` matches `reliable_endpoint_reset`: sequence, acks, counters and
-    tracking buffers cleared, in-flight reassemblies released; smoothed stats
-    and rtt history deliberately not cleared.
+10. `Reset()` matches `reliable_endpoint_reset`: sequence, acks, counters,
+    every statistic and tracking buffers cleared, the rtt history refilled
+    with -1, in-flight reassemblies released.
 
 ## How to run everything
 

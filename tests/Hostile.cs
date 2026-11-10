@@ -65,30 +65,30 @@ internal static partial class Tests
     // ------------------------------------------------------------
     // every fragment rejection rule, one deliberate violation each
 
+    // helper: build a valid fragment for a given id/total with an embedded
+    // canonical header on fragment 0
+    private static byte[] BuildFragment(ushort sequence, int fragmentId, int numFragments, int dataBytes, ushort ack, uint ackBits)
+    {
+        byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + dataBytes];
+        int p = 0;
+        buffer[p++] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
+        p += 2;
+        buffer[p++] = (byte)fragmentId;
+        buffer[p++] = (byte)(numFragments - 1);
+        if (fragmentId == 0)
+        {
+            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, ack, ackBits);
+        }
+        for (int i = 0; i < dataBytes; i++)
+        {
+            buffer[p++] = (byte)(i + sequence);
+        }
+        return buffer.AsSpan(0, p).ToArray();
+    }
+
     private static void TestHostileFragments()
     {
-        // helper: build a valid fragment for a given id/total with an embedded
-        // canonical header on fragment 0
-        static byte[] BuildFragment(ushort sequence, int fragmentId, int numFragments, int dataBytes, ushort ack, uint ackBits)
-        {
-            byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + dataBytes];
-            int p = 0;
-            buffer[p++] = 1;
-            BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
-            p += 2;
-            buffer[p++] = (byte)fragmentId;
-            buffer[p++] = (byte)(numFragments - 1);
-            if (fragmentId == 0)
-            {
-                p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, ack, ackBits);
-            }
-            for (int i = 0; i < dataBytes; i++)
-            {
-                buffer[p++] = (byte)(i + sequence);
-            }
-            return buffer.AsSpan(0, p).ToArray();
-        }
-
         Endpoint sink;
         Func<int> processed;
 
@@ -207,6 +207,51 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // a first fragment advances the received-packet window when its reassembly
+    // entry is created, as the C library does (reliable_endpoint_receive_packet
+    // calls reliable_sequence_buffer_advance on received_packets there): a
+    // packet older than the window behind that fragment is stale
+
+    private static void TestFragmentAdvancesReceivedWindow()
+    {
+        Endpoint sink = MakeSink(out Func<int> processed);
+        sink.ReceivePacket(BuildFragment(512, 1, 2, 0, 0, 0));
+        Check(sink.FragmentReassemblyExists(512), "first fragment at 512 held for reassembly");
+        Check(sink.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "first fragment at 512 accepted");
+
+        byte[] genuine = new byte[Wire.MaxPacketHeaderBytes + 1];
+        int genuineBytes = Wire.WritePacketHeader(genuine, 0, 0xFFFF, 0);
+        sink.ReceivePacket(genuine.AsSpan(0, genuineBytes + 1));
+        Check(sink.GetCounter(EndpointCounter.NumPacketsStale) == 1, "sequence 0 is stale behind the window advanced to 512");
+        Check(processed() == 0, "a stale packet is not processed");
+    }
+
+    // ------------------------------------------------------------
+    // an in-order fragmented packet (500 + 250 = 1.5 x fragment_size) at
+    // sequence 0 reassembles from two fragments and is delivered at full size
+
+    private static void TestTwoFragmentPacketReassembles()
+    {
+        int deliveredLength = -1;
+        ushort deliveredSequence = 0xFFFF;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            Name = "sink",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { deliveredSequence = sequence; deliveredLength = packetData.Length; return true; },
+        }, 100.0);
+        sink.ReceivePacket(BuildFragment(0, 0, 2, 500, 0xFFFF, 0));
+        sink.ReceivePacket(BuildFragment(0, 1, 2, 250, 0xFFFF, 0));
+        Check(deliveredSequence == 0, "reassembled packet delivered at sequence 0");
+        Check(deliveredLength == 750, $"reassembled packet delivered at full size, got {deliveredLength}");
+        Check(!sink.FragmentReassemblyExists(0), "reassembly slot cleaned up");
+    }
+
+    // ------------------------------------------------------------
     // parser fuzz: random bytes through both header parsers, no exceptions ever
 
     private static void TestHostileParserFuzz()
@@ -284,6 +329,24 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // an empty datagram is hostile input: counted invalid and dropped, never thrown
+
+    private static void TestReceiveEmptyPacketIsCountedInvalid()
+    {
+        int processed = 0;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { processed++; return true; },
+        }, 0.0);
+
+        sink.ReceivePacket(ReadOnlySpan<byte>.Empty);
+
+        Check(processed == 0, "empty packet does not call the process callback");
+        Check(sink.GetCounter(EndpointCounter.NumPacketsInvalid) == 1, "empty packet counted invalid");
+    }
+
+    // ------------------------------------------------------------
     // API misuse: configuration is validated at construction; wire data never throws
 
     private static void TestConfigValidation()
@@ -340,15 +403,192 @@ internal static partial class Tests
         // the largest fragmentable packet must fit in MaxFragments fragments
         MustThrowConfig(c => { c.MaxPacketSize = 16 * 1024; c.FragmentAbove = 1024; c.FragmentSize = 1024; c.MaxFragments = 8; }, "MaxFragments cannot cover MaxPacketSize");
 
-        // empty spans are API misuse on both paths (the C library asserts packet_bytes > 0)
-        Endpoint endpoint = new Endpoint(Valid(), 0.0);
+        // an empty send is API misuse (the C library asserts packet_bytes > 0).
+        // an empty receive is hostile input: counted invalid and dropped.
+        int receivedCalls = 0;
+        EndpointConfig receiveConfig = Valid();
+        receiveConfig.ProcessPacket = (id, sequence, packetData) => { receivedCalls++; return true; };
+        Endpoint endpoint = new Endpoint(receiveConfig, 0.0);
         MustThrow(() => endpoint.SendPacket(ReadOnlySpan<byte>.Empty), "SendPacket(empty)");
-        MustThrow(() => endpoint.ReceivePacket(ReadOnlySpan<byte>.Empty), "ReceivePacket(empty)");
+        endpoint.ReceivePacket(ReadOnlySpan<byte>.Empty);
+        Check(receivedCalls == 0, "empty receive does not call the process callback");
+        Check(endpoint.GetCounter(EndpointCounter.NumPacketsInvalid) == 1, "empty receive counted invalid");
 
         // oversized send is NOT misuse: dropped and counted, exactly like C
         endpoint.SendPacket(new byte[17 * 1024]);
         Check(endpoint.GetCounter(EndpointCounter.NumPacketsTooLargeToSend) == 1, "oversized send counted, not thrown");
         Check(endpoint.NextPacketSequence == 0, "oversized send consumes no sequence number");
+    }
+
+    // ------------------------------------------------------------
+    // the three sequence buffers must each be a power of two no larger than
+    // 16384 (stricter than the pinned C release, which requires only a positive
+    // size): 100, 32768, 65535 and 65536 are
+    // refused on each field; 256 and 16384 are accepted and carry a one-byte send
+
+    private static void TestConfigRefusesBadSequenceBufferSizes()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => true,
+            };
+        }
+
+        static void MustThrow(Action action, string what)
+        {
+            try
+            {
+                action();
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must throw ArgumentException");
+        }
+
+        (string field, Action<EndpointConfig, int> set)[] fields =
+        {
+            ("SentPacketsBufferSize", (c, v) => c.SentPacketsBufferSize = v),
+            ("ReceivedPacketsBufferSize", (c, v) => c.ReceivedPacketsBufferSize = v),
+            ("FragmentReassemblyBufferSize", (c, v) => c.FragmentReassemblyBufferSize = v),
+        };
+
+        int[] refused = { 100, 32768, 65535, 65536 };
+        int[] accepted = { 256, 16384 };
+
+        foreach ((string field, Action<EndpointConfig, int> set) in fields)
+        {
+            foreach (int value in refused)
+            {
+                EndpointConfig config = Valid();
+                set(config, value);
+                MustThrow(() => _ = new Endpoint(config, 0.0), $"{field} = {value} refused");
+            }
+
+            foreach (int value in accepted)
+            {
+                TestContext context = new TestContext();
+                EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+                set(senderConfig, value);
+                EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+                context.Sender = new Endpoint(senderConfig, 0.0);
+                context.Receiver = new Endpoint(receiverConfig, 0.0);
+
+                context.Sender.SendPacket(new byte[1]);
+                context.Receiver.SendPacket(new byte[1]);
+
+                Check(context.Sender.GetAcks().Length > 0, $"{field} = {value} accepted and a one-byte send is acked");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // the C reference bounds the port was missing, one refused case each
+
+    private static void TestConfigRefusesTheCBounds()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => true,
+            };
+        }
+
+        static void MustThrowConfig(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must throw ArgumentException");
+        }
+
+        // fragment_above > max_packet_size can never fire
+        MustThrowConfig(c => { c.FragmentAbove = 2048; c.MaxPacketSize = 1024; }, "FragmentAbove > MaxPacketSize");
+
+        // max_fragments * fragment_size does not fit in a packet length
+        MustThrowConfig(c => { c.MaxFragments = 256; c.FragmentSize = 9_000_000; }, "MaxFragments * FragmentSize overflows a packet length");
+
+        // max_packet_size is too large for the receive length check
+        MustThrowConfig(c => { c.MaxPacketSize = int.MaxValue - 10; }, "MaxPacketSize too large for receive length check");
+
+        // packet_header_size must not be negative
+        MustThrowConfig(c => { c.PacketHeaderSize = -1; }, "PacketHeaderSize < 0");
+
+        // packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX
+        MustThrowConfig(c => { c.PacketHeaderSize = 28; c.MaxPacketSize = int.MaxValue - 14 - 28 + 1; }, "header + max + 9 + 5 > INT_MAX");
+    }
+
+    // ------------------------------------------------------------
+    // the reassembly buffer is rented from the pool and must be zeroed on the
+    // requested length before fragments are stored, so a poisoned pool buffer
+    // never leaks a stale byte into a delivered packet
+
+    private static void TestReassemblyBufferIsZeroed()
+    {
+        // poison the pool: rent a buffer the reassembly path will reuse, fill it
+        // with 0xAA, return it
+        byte[] poisoned = System.Buffers.ArrayPool<byte>.Shared.Rent(4096);
+        for (int i = 0; i < poisoned.Length; ++i)
+        {
+            poisoned[i] = 0xAA;
+        }
+        System.Buffers.ArrayPool<byte>.Shared.Return(poisoned);
+
+        int processed = 0;
+        byte[]? delivered = null;
+        Endpoint sink = new Endpoint(new EndpointConfig
+        {
+            Name = "sink",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => { processed++; delivered = packetData.ToArray(); return true; },
+        }, 100.0);
+
+        // a 600-byte packet fragments into 500 + 100 bytes. deliver the second
+        // fragment first (completing nothing), then the first (completes the set).
+        byte[] packet = new byte[600];
+        for (int i = 0; i < packet.Length; ++i)
+        {
+            packet[i] = (byte)(0x11 + (i % 0x10));
+        }
+
+        // build the two fragments on the wire shape and feed them out of order
+        // through a helper endpoint, mirroring the fragment header layout
+        Endpoint source = new Endpoint(new EndpointConfig
+        {
+            Name = "source",
+            MaxPacketSize = 8000,
+            FragmentAbove = 500,
+            FragmentSize = 500,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, fragment) => { sink.ReceivePacket(fragment); },
+            ProcessPacket = (id, sequence, packetData) => true,
+        }, 100.0);
+
+        source.SendPacket(packet);
+
+        Check(processed == 1, "reassembled packet delivered exactly once");
+        Check(delivered != null && delivered.Length == 600, "reassembled packet is the original 600 bytes");
+        for (int i = 0; i < delivered!.Length; ++i)
+        {
+            Check(delivered[i] == packet[i], $"reassembled byte {i} matches the sent payload");
+        }
     }
 
     // ------------------------------------------------------------
