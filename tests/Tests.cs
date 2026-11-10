@@ -74,6 +74,7 @@ internal static partial class Tests
         RunTest("test_packets", TestPackets);
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
+        RunTest("test_sequence_buffer_non_power_of_two_wrap", TestSequenceBufferNonPowerOfTwoWrap);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
@@ -279,6 +280,43 @@ internal static partial class Tests
 
         Check(ack == 11, "sparse ack");
         Check(ackBits == (1u | (1u << (11 - 9)) | (1u << (11 - 5)) | (1u << (11 - 1))), "sparse ack bits");
+    }
+
+    // ------------------------------------------------------------
+    // test_sequence_buffer_non_power_of_two_wrap
+
+    private static void TestSequenceBufferNonPowerOfTwoWrap()
+    {
+        int[] sizes = { 3, 255 };
+        foreach (int size in sizes)
+        {
+            SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(size);
+
+            int window = Math.Min(size, 32);
+            int start = 65536 - 2 * size;
+            for (int i = 0; i < 4 * size; ++i)
+            {
+                ushort sequence = (ushort)(start + i);
+                Check(sequenceBuffer.Insert(sequence) != -1, $"size {size}: insert({sequence})");
+
+                for (int j = 0; j < Math.Min(i + 1, size); ++j)
+                {
+                    ushort recent = (ushort)(sequence - j);
+                    Check(sequenceBuffer.Exists(recent), $"size {size}: {recent} present after insert({sequence})");
+                    Check(sequenceBuffer.Find(recent) != -1, $"size {size}: find({recent}) after insert({sequence})");
+                }
+
+                sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+                Check(ack == sequence, $"size {size}: ack after insert({sequence})");
+                for (int j = 0; j < Math.Min(i + 1, window); ++j)
+                {
+                    Check((ackBits & (1u << j)) != 0, $"size {size}: ack bit {j} after insert({sequence})");
+                }
+            }
+
+            Check(sequenceBuffer.NumEntries >= size, $"size {size}: num entries covers the request");
+            Check((sequenceBuffer.NumEntries & (sequenceBuffer.NumEntries - 1)) == 0, $"size {size}: num entries is a power of two");
+        }
     }
 
     // ------------------------------------------------------------
