@@ -56,7 +56,9 @@ public delegate void TransmitPacketCallback(ulong id, ushort sequence, ReadOnlyS
 /// <summary>
 /// Called when a packet is received. Return <c>true</c> to accept and ack the
 /// packet; <c>false</c> to reject it — rejected packets are not acked and may be
-/// processed again if they arrive again.
+/// processed again if they arrive again. Acks carried by a rejected packet are
+/// discarded, and a packet sent from inside this callback does not yet ack the
+/// packet currently being processed.
 /// </summary>
 /// <param name="id">The endpoint id, so shared callbacks can tell endpoints apart.</param>
 /// <param name="sequence">The sequence number of the received packet.</param>
@@ -147,7 +149,13 @@ public enum EndpointCounter
 /// Endpoint configuration, mirroring reliable_config_t. The defaults are the C
 /// library's reliable_default_config: sensible for a client/server game
 /// exchanging packets at 60HZ. The endpoint copies the configuration at
-/// construction; later changes to a config object have no effect.
+/// construction; later changes to a config object have no effect. Both peers
+/// must agree on <see cref="FragmentSize"/> and use compatible
+/// <see cref="MaxFragments"/> values. <see cref="SentPacketsBufferSize"/> and
+/// <see cref="ReceivedPacketsBufferSize"/> must be at least 4 for bandwidth
+/// statistics: the sample count is half the buffer size and needs two distinct
+/// packet times. A <see cref="SentPacketsBufferSize"/> of 1 also gives a zero
+/// packet loss estimate, because there are no sent samples.
 /// </summary>
 public sealed class EndpointConfig
 {
@@ -163,10 +171,10 @@ public sealed class EndpointConfig
     /// <summary>Packets larger than this many bytes are sent as fragments.</summary>
     public int FragmentAbove = 1024;
 
-    /// <summary>Maximum number of fragments per-packet. 256 max. Must cover MaxPacketSize / FragmentSize.</summary>
+    /// <summary>Maximum number of fragments per-packet. 256 max. Must cover MaxPacketSize / FragmentSize. Both peers must use compatible values.</summary>
     public int MaxFragments = 16;
 
-    /// <summary>Size of each fragment (bytes).</summary>
+    /// <summary>Size of each fragment (bytes). Both peers must agree on this value.</summary>
     public int FragmentSize = 1024;
 
     /// <summary>Maximum number of acks buffered between calls to <see cref="Endpoint.ClearAcks"/>.</summary>
@@ -1440,7 +1448,8 @@ public sealed class Endpoint
 
     /// <summary>
     /// Updates rtt, jitter, packet loss and bandwidth stats. Call once per-frame
-    /// with the current time in seconds.
+    /// with the current time in seconds. The time must be monotonically
+    /// non-decreasing, starting with the time passed to the constructor.
     /// </summary>
     public void Update(double time)
     {
@@ -1734,13 +1743,29 @@ public sealed class Endpoint
     /// <summary>Smoothed packet loss, as a percentage.</summary>
     public float PacketLoss => _packetLoss;
 
-    /// <summary>Smoothed sent bandwidth, in kilobits per second.</summary>
+    /// <summary>
+    /// Smoothed sent bandwidth, in kilobits per second. Counts
+    /// <see cref="EndpointConfig.PacketHeaderSize"/> plus the payload bytes once
+    /// per send, even for fragmented packets. The estimate samples packet
+    /// history and does not decay to zero when traffic stops.
+    /// </summary>
     public float SentBandwidthKbps => _sentBandwidthKbps;
 
-    /// <summary>Smoothed received bandwidth, in kilobits per second.</summary>
+    /// <summary>
+    /// Smoothed received bandwidth, in kilobits per second. Counts
+    /// <see cref="EndpointConfig.PacketHeaderSize"/> plus the accepted packet
+    /// bytes, including reliable's wire header; a fragmented packet is counted
+    /// once after reassembly. The estimate samples packet history and does not
+    /// decay to zero when traffic stops.
+    /// </summary>
     public float ReceivedBandwidthKbps => _receivedBandwidthKbps;
 
-    /// <summary>Smoothed acked bandwidth, in kilobits per second.</summary>
+    /// <summary>
+    /// Smoothed acked bandwidth, in kilobits per second. Counts the same bytes
+    /// as <see cref="SentBandwidthKbps"/>, for acked sent packets only. The
+    /// estimate samples packet history and does not decay to zero when
+    /// traffic stops.
+    /// </summary>
     public float AckedBandwidthKbps => _ackedBandwidthKbps;
 
     /// <summary>The number of counters in <see cref="Counters"/>.</summary>

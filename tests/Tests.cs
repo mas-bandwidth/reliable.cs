@@ -120,6 +120,7 @@ internal static partial class Tests
 
         // C#-specific: seeded adversarial soak (the fuzz.c link model)
         RunTest("test_soak", TestSoak);
+        RunTest("test_soak_sequence_wrap", TestSoakSequenceWrap);
 
         if (s_testsRun == 0)
         {
