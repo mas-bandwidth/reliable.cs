@@ -1014,11 +1014,11 @@ internal static partial class Tests
             {
                 _ = new Endpoint(config, 0.0);
             }
-            catch (ArgumentException)
+            catch (ArgumentOutOfRangeException)
             {
-                return; // ArgumentOutOfRangeException is an ArgumentException too
+                return;
             }
-            Check(false, $"{what} must throw ArgumentException");
+            Check(false, $"{what} must throw ArgumentOutOfRangeException");
         }
 
         // a valid default config constructs
