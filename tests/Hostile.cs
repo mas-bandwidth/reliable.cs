@@ -648,6 +648,9 @@ internal static partial class Tests
         // max_packet_size is too large for the receive length check
         MustThrowConfig(c => { c.MaxPacketSize = int.MaxValue - 10; }, "MaxPacketSize too large for receive length check");
 
+        // fragment_size plus the 5 + 9 header bytes must fit in an int
+        MustThrowConfig(c => { c.MaxFragments = 1; c.FragmentSize = int.MaxValue - 14 + 1; }, "FragmentSize + 14 > INT_MAX");
+
         // packet_header_size must not be negative
         MustThrowConfig(c => { c.PacketHeaderSize = -1; }, "PacketHeaderSize < 0");
 

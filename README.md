@@ -137,8 +137,8 @@ C# programmer would expect. The differences, all recorded in
   per packet. That includes the send path's fragment-count assert, checked at
   construction as "MaxFragments must cover MaxPacketSize". The C reference's
   other bounds hold too (fragment_above may not exceed max_packet_size;
-  max_fragments * fragment_size and max_packet_size are each checked against
-  INT_MAX).
+  max_fragments * fragment_size, fragment_size and max_packet_size are each
+  checked against INT_MAX).
 - Four bounds go beyond the pinned C release (`v1.4.5`). The
   unit tests pin them; the interop gate feeds only inputs on which both
   implementations agree:

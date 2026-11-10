@@ -912,6 +912,11 @@ public sealed class Endpoint
             throw new ArgumentException("config.MaxPacketSize is too large for the receive length check", nameof(config));
         }
 
+        if (config.FragmentSize > int.MaxValue - Wire.FragmentHeaderBytes - Wire.MaxPacketHeaderBytes)
+        {
+            throw new ArgumentException("config.FragmentSize is too large for a fragment buffer", nameof(config));
+        }
+
         if (config.PacketHeaderSize < 0) throw new ArgumentException("config.PacketHeaderSize must not be negative", nameof(config));
 
         if ((long)config.PacketHeaderSize + config.MaxPacketSize + Wire.MaxPacketHeaderBytes + Wire.FragmentHeaderBytes > int.MaxValue)
