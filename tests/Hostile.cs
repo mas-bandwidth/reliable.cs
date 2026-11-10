@@ -329,6 +329,14 @@ internal static partial class Tests
         Check(packetData[Wire.MaxPacketHeaderBytes + fragmentSize] == 0x11, "in bounds fragment start is written");
         Check(packetData[Wire.MaxPacketHeaderBytes + 2 * fragmentSize - 1] == 0x22, "in bounds fragment end is written");
         Check(reassembly.PacketBytes == 2 * fragmentSize, "stored fragment sets the packet byte count");
+
+        Array.Fill(packetData, (byte)0xAA);
+        stored = Endpoint.StoreFragmentData(ref reassembly, 0, 0xFFFF, 0, numFragments, fragmentSize, new byte[fragmentSize]);
+        Check(!stored, "fragment past the fragment count is not stored");
+        for (int i = 0; i < packetBufferSize; i++)
+        {
+            Check(packetData[i] == 0xAA, $"out-of-range fragment writes no byte {i}");
+        }
     }
 
     // ------------------------------------------------------------
