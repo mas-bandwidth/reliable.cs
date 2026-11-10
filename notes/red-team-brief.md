@@ -4,7 +4,7 @@ You are attacking the C# port of mas-bandwidth/reliable. This document tells you
 what the port claims and how to run it. It deliberately contains no design
 rationale — come in cold and try to break the claims.
 
-Reference implementation: `mas-bandwidth/reliable` at tag `v1.4.0` (clone it
+Reference implementation: `mas-bandwidth/reliable` at tag `v1.4.5` (clone it
 next to this repo as `../reliable`). Normative wire spec: `STANDARD.md`
 (vendored verbatim from the C repo). Where this port and the C library disagree
 on wire bytes or observable protocol behavior, the port is wrong, with the
@@ -67,9 +67,10 @@ Behavior:
    brand-new fragment reassembly rents (from `ArrayPool<byte>.Shared`), and
    every rented buffer is returned on delivery, eviction, and `Reset()`
    (`Endpoint.OutstandingReassemblyBuffers`, internal, tracks the balance).
-8. Sequence arithmetic wraps at 16 bits everywhere; behavior across the 65535→0
-   boundary matches the C library, including stale/duplicate windows and
-   reassembly eviction.
+8. Sequence arithmetic wraps at 16 bits everywhere. `test_sequence_buffer_rollover`
+   sends 32769 packets and stops before 65535→0; `test_sequence_wrap` crosses
+   that boundary. Across the full wrap, stale/duplicate windows and reassembly
+   eviction should match the C library.
 9. Reported acks are exactly the C library's: only sequences actually sent, at
    most once each, ack-buffer overflow drops with later recovery.
 10. `Reset()` matches `reliable_endpoint_reset`: sequence, acks, counters,

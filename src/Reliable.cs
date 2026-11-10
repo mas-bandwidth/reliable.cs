@@ -1,23 +1,22 @@
 /*
     Reliable.cs
 
-    C# port of the reliable C library (mas-bandwidth/reliable): packet
+    C# port of the reliable C library (mas-bandwidth/reliable, v1.4.5): packet
     acknowledgement, fragmentation/reassembly, and rtt/jitter/packet loss/bandwidth
     estimation over an unreliable datagram transport. It does not retransmit: it
     tells you which packets arrived; what you do about the ones that did not is
     your business.
 
-    The wire format is byte-identical to the C library (see STANDARD.md, vendored
-    verbatim from the C repo) and the protocol state machines match it observable-
-    behavior-for-observable-behavior — proven by the interop gate in compat/, which
-    runs this code head-to-head against the real reliable.c.
+    The wire format follows the C library (see STANDARD.md, vendored from the
+    C repo). The interop gate in compat/ checks wire bytes and observable
+    behavior against reliable.c at the pinned reference version.
 
-    The API is what a careful C# expert would write, not a transliteration:
+    The API uses C# types rather than a direct transliteration:
     Span<byte> everywhere a C pointer+length was, delegates that close over state
     instead of void* contexts, construction-time config validation instead of
-    debug-only asserts, and the GC instead of caller-supplied allocators. Family
-    values (shared with serialize.cs): zero third-party dependencies; malicious
-    packet data never throws — hostile input fails into counters and is dropped,
+    debug-only asserts, and the GC instead of caller-supplied allocators. It has
+    zero third-party package dependencies; malicious packet data never throws —
+    hostile input fails into counters and is dropped,
     exactly like the C library; exceptions are reserved for API misuse; no unsafe
     code; zero allocation at steady state everywhere the C library is zero-alloc
     (new fragment reassemblies rent from ArrayPool, the one place C mallocs).
@@ -26,9 +25,9 @@
     per thread, or protect each endpoint with your own lock. The log level and
     writer are process-wide.
 
-    Copyright © 2026 Más Bandwidth LLC. Licensed under AGPL-3.0 (see LICENSE);
-    intended to move to MBSL when ready. The reference C implementation is
-    BSD-3-Clause, © 2017-2026 Más Bandwidth LLC.
+    Copyright © 2026 Más Bandwidth LLC. Licensed under AGPL-3.0 (see LICENSE).
+    The reference C implementation is BSD-3-Clause,
+    © 2017-2026 Más Bandwidth LLC.
 */
 
 using System;

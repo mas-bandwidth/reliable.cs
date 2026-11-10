@@ -1,9 +1,9 @@
 # Port map: reliable (C) → reliable.cs
 
-Survey of the whole C library (`mas-bandwidth/reliable` @ v1.4.0, reliable.h 248
-lines + reliable.c 3064 lines including embedded tests), and the C# shape of every
-piece. The wire and the protocol semantics are the C library's, byte-exact where
-the wire is concerned; the API is what a careful C# expert would write.
+Survey of the C library (`mas-bandwidth/reliable` @ v1.4.5) and the C# shape of
+its corresponding pieces. The wire and the protocol semantics are the C
+library's, byte-exact where the wire is concerned; the API is what a careful
+C# expert would write.
 
 ## Public API surface (reliable.h) → C#
 
@@ -67,16 +67,16 @@ the wire is concerned; the API is what a careful C# expert would write.
 C: write-side / caller-supplied inputs are assert-only (compiled out in release —
 "release builds trust the caller" is the maintainer's design contract); read-side /
 wire inputs are always runtime-checked. C# has no compile-out-in-release assert
-convention visible to library consumers, and the serialize.cs family doctrine is:
+convention visible to library consumers. In this port,
 trusted parameters are validated as **API misuse** (throws `ArgumentException` /
 `ArgumentOutOfRangeException`), wire data **never throws** — it fails into counters
 and drops, exactly like C.
 
-- `EndpointConfig` validation → constructor throws (the C debug asserts' list:
-  MaxPacketSize > 0, FragmentAbove > 0, 0 < MaxFragments ≤ 256, FragmentSize > 0,
-  buffer sizes > 0, RttHistorySize > 0, callbacks non-null). Once, at construction —
-  zero steady-state cost, and it removes the `max_fragments > 256` release-mode UB
-  hazard without adding per-packet checks the C design forbids.
+- `EndpointConfig` validation → constructor throws for nonpositive packet,
+  fragment, ack, and history sizes; missing callbacks; and limits that prevent
+  invalid packet lengths. This port additionally requires each sequence-buffer
+  size to be a power of two ≤ 16384 and each smoothing factor to be finite and
+  in [0,1]. Validation happens once at construction, with no steady-state cost.
 - `SendPacket`/`ReceivePacket` with an empty span → `ArgumentException` (C: assert).
 - Everything the C library runtime-checks on the receive path is runtime-checked
   here, identically.
@@ -109,7 +109,7 @@ tests mirror C's tracking allocator with an internal outstanding-rental counter.
 | test_ack_buffer_overflow | test_ack_buffer_overflow | Drop + recovery-after-clear. |
 | test_packets | test_packets | fragment_above=500 exchange with payload validation. |
 | test_large_packets | test_large_packets | max-size packet exactly at the boundary. |
-| test_sequence_buffer_rollover | test_sequence_buffer_rollover | 32768+ sends across the wrap. |
+| test_sequence_buffer_rollover | test_sequence_buffer_rollover | 32769 sends; stops before 65535→0. `test_sequence_wrap` covers the full wrap separately. |
 | test_fragment_cleanup | test_fragment_cleanup | Tracking allocator → outstanding-rental counter == 0. |
 | test_rtt | test_rtt | |
 | test_endpoint_reset | test_endpoint_reset | Includes in-flight reassembly freed, no double-free analog. |

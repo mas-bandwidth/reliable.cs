@@ -1,10 +1,10 @@
 /*
     Hostile.cs
 
-    C#-specific tests: hostile wire input against every rejection rule (nothing
-    off the wire may ever throw — failures land in counters and the packet is
-    dropped), API misuse validation, the zero-allocation steady-state proof, and
-    a port of the C repo's fuzz_target.c operation-script harness.
+    C# tests for hostile wire input, API misuse, steady-state allocation, and
+    the operation-script harness adapted from the C reference. The receive
+    cases check that rejected wire input is counted and dropped without an
+    exception.
 */
 
 using System;
@@ -422,8 +422,7 @@ internal static partial class Tests
 
     // ------------------------------------------------------------
     // the three sequence buffers must each be a power of two no larger than
-    // 16384 (stricter than the pinned C release, which requires only a positive
-    // size): 100, 32768, 65535 and 65536 are
+    // 16384: 100, 32768, 65535 and 65536 are
     // refused on each field; 256 and 16384 are accepted and carry a one-byte send
 
     private static void TestConfigRefusesBadSequenceBufferSizes()
