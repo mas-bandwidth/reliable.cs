@@ -856,6 +856,12 @@ public sealed class Endpoint
     {
         if (config == null) throw new ArgumentNullException(nameof(config));
         if (config.Name == null) throw new ArgumentException("config.Name must not be null", nameof(config));
+        if (float.IsNaN(config.RttSmoothingFactor) || config.RttSmoothingFactor < 0.0f || config.RttSmoothingFactor > 1.0f)
+            throw new ArgumentOutOfRangeException(nameof(config), config.RttSmoothingFactor, "config.RttSmoothingFactor must be in [0,1]");
+        if (float.IsNaN(config.PacketLossSmoothingFactor) || config.PacketLossSmoothingFactor < 0.0f || config.PacketLossSmoothingFactor > 1.0f)
+            throw new ArgumentOutOfRangeException(nameof(config), config.PacketLossSmoothingFactor, "config.PacketLossSmoothingFactor must be in [0,1]");
+        if (float.IsNaN(config.BandwidthSmoothingFactor) || config.BandwidthSmoothingFactor < 0.0f || config.BandwidthSmoothingFactor > 1.0f)
+            throw new ArgumentOutOfRangeException(nameof(config), config.BandwidthSmoothingFactor, "config.BandwidthSmoothingFactor must be in [0,1]");
         if (config.MaxPacketSize <= 0) throw new ArgumentException("config.MaxPacketSize must be positive", nameof(config));
         if (config.FragmentAbove <= 0) throw new ArgumentException("config.FragmentAbove must be positive", nameof(config));
         if (config.MaxFragments <= 0 || config.MaxFragments > 256) throw new ArgumentException("config.MaxFragments must be in [1,256]", nameof(config));

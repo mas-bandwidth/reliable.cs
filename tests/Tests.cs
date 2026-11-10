@@ -84,6 +84,7 @@ internal static partial class Tests
         RunTest("test_jitter_estimator", TestJitterEstimator);
         RunTest("test_bandwidth_estimators", TestBandwidthEstimators);
         RunTest("test_endpoint_reset", TestEndpointReset);
+        RunTest("test_smoothing_factor_range", TestSmoothingFactorRange);
         RunTest("test_endpoint_create_invalid_config", TestEndpointCreateInvalidConfig);
         RunTest("test_fragment_counts", TestFragmentCounts);
         RunTest("test_truncated_packets", TestTruncatedPackets);
@@ -1452,6 +1453,53 @@ internal static partial class Tests
 
     // ------------------------------------------------------------
     // test_endpoint_create_invalid_config
+
+    private static void TestSmoothingFactorRange()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => true,
+            };
+        }
+
+        static void MustThrow(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return;
+            }
+            Check(false, $"{what} must throw ArgumentOutOfRangeException");
+        }
+
+        _ = new Endpoint(Valid(), 0.0);
+
+        float[] invalid = { -0.1f, 1.1f, float.NaN };
+
+        foreach (float value in invalid)
+        {
+            MustThrow(c => c.RttSmoothingFactor = value, $"RttSmoothingFactor = {value}");
+            MustThrow(c => c.PacketLossSmoothingFactor = value, $"PacketLossSmoothingFactor = {value}");
+            MustThrow(c => c.BandwidthSmoothingFactor = value, $"BandwidthSmoothingFactor = {value}");
+        }
+
+        _ = new Endpoint(new EndpointConfig
+        {
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) => true,
+            RttSmoothingFactor = 0.0f,
+            PacketLossSmoothingFactor = 1.0f,
+            BandwidthSmoothingFactor = 1.0f,
+        }, 0.0);
+    }
 
     private static void TestEndpointCreateInvalidConfig()
     {
