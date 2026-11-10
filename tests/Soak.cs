@@ -70,6 +70,8 @@ internal static partial class Tests
         private ushort _highest;
         private bool _started;
 
+        public long DeliveredCount { get; private set; }
+
         public void Processed(ushort sequence, string endpoint, ulong seed, int iteration)
         {
             if (!_started)
@@ -91,6 +93,7 @@ internal static partial class Tests
                 $"{endpoint} delivered sequence {sequence} more than once inside the receive window (seed {seed}, iteration {iteration})");
 
             _delivered[sequence] = true;
+            DeliveredCount++;
         }
     }
 
@@ -283,7 +286,7 @@ internal static partial class Tests
         Check(server.OutstandingReassemblyBuffers == 0, $"server leaked reassembly buffers (seed {seed})");
     }
 
-    private static void SoakCleanOneSeed(ulong seed, int iterations)
+    private static void SoakCleanOneSeed(ulong seed, int iterations, bool expectSequenceWrap = false)
     {
         SoakRng rng = new SoakRng(seed);
 
@@ -423,6 +426,16 @@ internal static partial class Tests
             iteration += chunk;
         }
 
+        // on the wrap leg, assert the run actually crossed 16 bit sequence space
+        // instead of silently finishing short of the boundary
+        if (expectSequenceWrap)
+        {
+            Check(clientDelivered.DeliveredCount > SoakSequenceSpace,
+                $"client delivered only {clientDelivered.DeliveredCount} packets, did not cross the sequence wrap (seed {seed})");
+            Check(serverDelivered.DeliveredCount > SoakSequenceSpace,
+                $"server delivered only {serverDelivered.DeliveredCount} packets, did not cross the sequence wrap (seed {seed})");
+        }
+
         // invariant: reset returns every pooled buffer
         client.Reset();
         server.Reset();
@@ -442,6 +455,6 @@ internal static partial class Tests
     private static void TestSoakSequenceWrap()
     {
         int iterations = SoakSequenceSpace + (s_shortMode ? 64 : 1024);
-        SoakCleanOneSeed(65537, iterations);
+        SoakCleanOneSeed(65537, iterations, expectSequenceWrap: true);
     }
 }
