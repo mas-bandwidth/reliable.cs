@@ -1013,23 +1013,71 @@ internal static partial class Tests
         EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
         receiverConfig.FragmentAbove = 500;
 
+        int numBigPacketsDelivered = 0;
+        receiverConfig.ProcessPacket = (id, sequence, packetData) =>
+        {
+            if (packetData.Length == TestMaxPacketBytes)
+            {
+                numBigPacketsDelivered++;
+            }
+            return true;
+        };
+
         context.Sender = new Endpoint(senderConfig, time);
         context.Receiver = new Endpoint(receiverConfig, time);
 
-        int numPacketsSent = 0;
         byte[] smallPacket = new byte[16];
-        for (int i = 0; i <= 32767; ++i)
+        byte[] bigPacket = new byte[TestMaxPacketBytes];
+
+        // small packets up to 65534, then fragmented packets at 32768, 65535 and 0 either side of
+        // the half way point and the wrap, then a small packet after the wrap
+
+        int numPacketsSent = 0;
+        for (int i = 0; i < 65535; ++i)
         {
-            context.Sender.SendPacket(smallPacket);
+            Check(context.Sender.NextPacketSequence == (ushort)i, $"next sequence {context.Sender.NextPacketSequence}, expected {i}");
+            context.Sender.SendPacket(i == 32768 ? bigPacket : smallPacket);
             ++numPacketsSent;
         }
 
-        byte[] bigPacket = new byte[TestMaxPacketBytes];
+        Check(context.Sender.NextPacketSequence == 65535, "next sequence 65535");
         context.Sender.SendPacket(bigPacket);
         ++numPacketsSent;
 
-        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ushort)numPacketsSent, "received counter across rollover");
+        Check(context.Sender.NextPacketSequence == 0, "next sequence 0");
+        context.Sender.SendPacket(bigPacket);
+        ++numPacketsSent;
+
+        Check(context.Sender.NextPacketSequence == 1, "next sequence 1");
+        context.Sender.SendPacket(smallPacket);
+        ++numPacketsSent;
+
+        Check(context.Sender.NextPacketSequence == 2, "next sequence 2");
+
+        Check(numPacketsSent == 65538, "packets sent");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == (ulong)numPacketsSent, "received counter across rollover");
         Check(context.Receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == 0, "no invalid fragments across rollover");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "no stale packets across rollover");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsDuplicate) == 0, "no duplicate packets across rollover");
+        Check(numBigPacketsDelivered == 3, $"fragmented packets delivered: {numBigPacketsDelivered}, expected 3");
+
+        // the receiver's window now spans the wrap: 65535, 0 and 1 are all present,
+        // so its next packet acks all three
+
+        context.Sender.ClearAcks();
+        context.Receiver.SendPacket(smallPacket);
+
+        bool acked65535 = false;
+        bool acked0 = false;
+        bool acked1 = false;
+        foreach (ushort ack in context.Sender.GetAcks())
+        {
+            acked65535 |= ack == 65535;
+            acked0 |= ack == 0;
+            acked1 |= ack == 1;
+        }
+
+        Check(acked65535 && acked0 && acked1, "65535, 0 and 1 acked across the wrap");
     }
 
     private static void TestSequenceWrap()
