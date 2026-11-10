@@ -151,8 +151,9 @@ public enum EndpointCounter
 /// exchanging packets at 60HZ. The endpoint copies the configuration at
 /// construction; later changes to a config object have no effect. Both peers
 /// must agree on <see cref="FragmentSize"/> and use compatible
-/// <see cref="MaxFragments"/> values; packet buffer sizes below 4 produce no
-/// packet loss or bandwidth samples.
+/// <see cref="MaxFragments"/> values. <see cref="SentPacketsBufferSize"/> and
+/// <see cref="ReceivedPacketsBufferSize"/> below 4 produce no packet loss or
+/// bandwidth samples.
 /// </summary>
 public sealed class EndpointConfig
 {
@@ -1741,20 +1742,23 @@ public sealed class Endpoint
     public float PacketLoss => _packetLoss;
 
     /// <summary>
-    /// Smoothed sent bandwidth, in kilobits per second. Counts the packet header
-    /// plus payload once per packet, and remains static when traffic stops.
+    /// Smoothed sent bandwidth, in kilobits per second. Counts the configured
+    /// packet header overhead plus the payload once per packet, excluding
+    /// reliable's wire header, and remains static when traffic stops.
     /// </summary>
     public float SentBandwidthKbps => _sentBandwidthKbps;
 
     /// <summary>
-    /// Smoothed received bandwidth, in kilobits per second. Includes reliable's
-    /// wire header (the whole datagram), and remains static when traffic stops.
+    /// Smoothed received bandwidth, in kilobits per second. Counts the whole
+    /// datagram, including reliable's wire header, and remains static when
+    /// traffic stops.
     /// </summary>
     public float ReceivedBandwidthKbps => _receivedBandwidthKbps;
 
     /// <summary>
-    /// Smoothed acked bandwidth, in kilobits per second. Counts the packet header
-    /// plus payload once per acked packet, and remains static when traffic stops.
+    /// Smoothed acked bandwidth, in kilobits per second. Counts the configured
+    /// packet header overhead plus the payload once per acked packet, excluding
+    /// reliable's wire header, and remains static when traffic stops.
     /// </summary>
     public float AckedBandwidthKbps => _ackedBandwidthKbps;
 
