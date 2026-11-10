@@ -294,6 +294,7 @@ internal static partial class Tests
 
             int window = Math.Min(size, 32);
             int start = 65536 - 2 * size;
+            sequenceBuffer.Sequence = (ushort)start;
             for (int i = 0; i < 4 * size; ++i)
             {
                 ushort sequence = (ushort)(start + i);

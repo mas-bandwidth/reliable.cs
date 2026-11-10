@@ -35,6 +35,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Numerics;
 
 namespace Reliable;
 
@@ -256,6 +257,12 @@ internal sealed class SequenceBuffer<T> where T : struct
     internal SequenceBuffer(int numEntries)
     {
         Debug.Assert(numEntries > 0);
+
+        // the slot index is sequence % num_entries over a 16-bit sequence, which stays
+        // continuous across the 65535 -> 0 wrap only when num_entries divides 65536, so
+        // round up to the next power of two (as reliable_sequence_buffer_create does).
+        numEntries = (int)BitOperations.RoundUpToPowerOf2((uint)numEntries);
+
         _entrySequence = new uint[numEntries];
         _entries = new T[numEntries];
         Array.Fill(_entrySequence, EmptySentinel);

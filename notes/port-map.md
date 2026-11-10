@@ -37,7 +37,7 @@ the wire is concerned; the API is what a careful C# expert would write.
 
 | C | C# |
 |---|---|
-| `reliable_sequence_buffer_t` + 13 functions | `internal sealed class SequenceBuffer<T> where T : struct` — `T[]` entries + `uint[]` entrySequence, `0xFFFFFFFF` = empty. Cleanup-function variants become an `Action<int>`-style per-slot cleanup hook where needed (fragment reassembly only). `InternalsVisibleTo` for tests. |
+| `reliable_sequence_buffer_t` + 13 functions | `internal sealed class SequenceBuffer<T> where T : struct` — `T[]` entries + `uint[]` entrySequence, `0xFFFFFFFF` = empty. The constructor rounds the entry count up to the next power of two, as `reliable_sequence_buffer_create` does, so `sequence % num_entries` stays continuous across the 65535 -> 0 wrap (the endpoint config still accepts only powers of two up to 16384). Cleanup-function variants become an `Action<int>`-style per-slot cleanup hook where needed (fragment reassembly only). `InternalsVisibleTo` for tests. |
 | `reliable_write_uint8/16/32/64`, read twins | `BinaryPrimitives` little-endian + a thin internal `Wire` cursor. Explicit LE (no endian detection, no `test_endian`). |
 | `reliable_write_packet_header` | `internal static Wire.WritePacketHeader(Span<byte>, ushort seq, ushort ack, uint ackBits) → int` |
 | `reliable_read_packet_header` | `Wire.ReadPacketHeader(ReadOnlySpan<byte>, out seq, out ack, out ackBits) → int` (−1 on reject) |
