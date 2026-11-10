@@ -77,19 +77,33 @@ internal static partial class Tests
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
         RunTest("test_sequence_wrap", TestSequenceWrap);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
+        RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
+        RunTest("test_packet_loss_estimator", TestPacketLossEstimator);
+        RunTest("test_jitter_estimator", TestJitterEstimator);
+        RunTest("test_bandwidth_estimators", TestBandwidthEstimators);
         RunTest("test_endpoint_reset", TestEndpointReset);
+        RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
+        RunTest("test_rtt_min_large", TestRttMinLarge);
+        RunTest("test_rtt_clamped_when_time_steps_back", TestRttClampedWhenTimeStepsBack);
 
-        // golden wire pins, generated from the real C library (v1.4.0)
+        // golden wire pins, generated from the real C library (v1.4.0; the
+        // interop vectors gate shows the pinned v1.4.5 emits the same bytes)
         RunTest("test_golden_packet_headers", TestGoldenPacketHeaders);
         RunTest("test_golden_fragments", TestGoldenFragments);
 
         // C#-specific: hostile input, API misuse, allocation discipline
         RunTest("test_hostile_truncated_headers", TestHostileTruncatedHeaders);
         RunTest("test_hostile_fragments", TestHostileFragments);
+        RunTest("test_fragment_advances_received_window", TestFragmentAdvancesReceivedWindow);
+        RunTest("test_two_fragment_packet_reassembles", TestTwoFragmentPacketReassembles);
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
+        RunTest("test_receive_empty_packet_is_counted_invalid", TestReceiveEmptyPacketIsCountedInvalid);
         RunTest("test_config_validation", TestConfigValidation);
+        RunTest("test_config_refuses_bad_sequence_buffer_sizes", TestConfigRefusesBadSequenceBufferSizes);
+        RunTest("test_config_refuses_the_c_bounds", TestConfigRefusesTheCBounds);
+        RunTest("test_reassembly_buffer_is_zeroed", TestReassemblyBufferIsZeroed);
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
 
@@ -1073,12 +1087,51 @@ internal static partial class Tests
     }
 
     // ------------------------------------------------------------
+    // test_unfinished_reassembly_respects_byte_budget
+
+    private static void TestUnfinishedReassemblyRespectsByteBudget()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentReassemblyByteBudget = 64 * 1024;
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        const int numFragments = 16;
+        int slotBytes = Wire.MaxPacketHeaderBytes + numFragments * receiverConfig.FragmentSize + 8;
+        int byteBudget = 64 * 1024;
+
+        // 64 last fragments for sequences 0..63, each claiming 16 fragments, with
+        // fragment 0 never arriving. every one is a first fragment for its packet
+        // and would allocate a full slot.
+        for (int sequence = 0; sequence < 64; ++sequence)
+        {
+            byte[] fragment = BuildFragment((ushort)sequence, numFragments - 1, numFragments, 1024, 0, 0);
+            context.Receiver.ReceivePacket(fragment);
+            Check(context.Receiver.OutstandingReassemblyBytes <= byteBudget + slotBytes,
+                $"outstanding reassembly bytes {context.Receiver.OutstandingReassemblyBytes} exceed budget + slot after sequence {sequence}");
+        }
+
+        Check(context.Receiver.OutstandingReassemblyBytes >= slotBytes, "the endpoint allocated at least one slot's worth of bytes");
+
+        context.Receiver.Reset();
+        Check(context.Receiver.OutstandingReassemblyBytes == 0, "outstanding reassembly bytes return to zero after reset");
+        Check(context.Receiver.OutstandingReassemblyBuffers == 0, "no reassembly buffers outstanding after reset");
+    }
+
+    // ------------------------------------------------------------
     // test_rtt
 
     private static void TestRtt()
     {
         double time = 100.0;
-        const double deltaTime = 0.01;
+        const double roundTripTime = 0.05;
+        const int numRoundTrips = 10;
+        const float expectedRtt = 50.0f;
 
         TestContext context = new TestContext();
 
@@ -1087,25 +1140,168 @@ internal static partial class Tests
 
         byte[] dummyPacket = new byte[8];
 
-        for (int i = 0; i < 1000; ++i)
+        for (int i = 0; i < numRoundTrips; ++i)
         {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
             context.Sender.SendPacket(dummyPacket);
-            context.Receiver.SendPacket(dummyPacket);
+
+            time += roundTripTime;
 
             context.Sender.Update(time);
             context.Receiver.Update(time);
 
-            time += deltaTime;
+            context.Receiver.SendPacket(dummyPacket);
         }
+
+        context.Sender.Update(time);
 
         float rtt = context.Sender.Rtt;
         float rttMin = context.Sender.RttMin;
         float rttMax = context.Sender.RttMax;
         float rttAvg = context.Sender.RttAvg;
 
-        Check(!float.IsNaN(rtt) && rtt >= 0, "rtt is finite and non-negative");
-        Check(rttMin >= 0 && rttMin <= rttAvg && rttAvg <= rttMax, "rtt min <= avg <= max");
-        Check(rttMax < 1000.0f, "rtt is in milliseconds");
+        Check(Math.Abs(rtt - expectedRtt) < 0.01f, $"rtt is {rtt}, expected {expectedRtt}");
+        Check(Math.Abs(rttMin - expectedRtt) < 0.01f, $"rtt min is {rttMin}, expected {expectedRtt}");
+        Check(Math.Abs(rttMax - expectedRtt) < 0.01f, $"rtt max is {rttMax}, expected {expectedRtt}");
+        Check(Math.Abs(rttAvg - expectedRtt) < 0.01f, $"rtt avg is {rttAvg}, expected {expectedRtt}");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt) < 0.01f, "jitter average vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt) < 0.01f, "jitter max vs min rtt is zero");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt) < 0.01f, "jitter stddev vs avg rtt is zero");
+    }
+
+    // ------------------------------------------------------------
+    // test_packet_loss_estimator
+
+    private static void TestPacketLossEstimator()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.PacketLossSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Drop = (i % 4) == 1;
+            context.Sender.SendPacket(dummyPacket);
+            context.Drop = false;
+            context.Receiver.SendPacket(dummyPacket);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+
+        float packetLoss = context.Sender.PacketLoss;
+
+        Check(Math.Abs(packetLoss - 25.0f) < 0.01f, $"packet loss is {packetLoss}, expected 25");
+    }
+
+    // ------------------------------------------------------------
+    // test_jitter_estimator
+
+    private static void TestJitterEstimator()
+    {
+        double time = 100.0;
+
+        float[] roundTripTimesMs = { 10.0f, 20.0f, 10.0f, 20.0f };
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        foreach (float roundTripTimeMs in roundTripTimesMs)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(dummyPacket);
+
+            time += roundTripTimeMs / 1000.0;
+
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Receiver.SendPacket(dummyPacket);
+        }
+
+        context.Sender.Update(time);
+
+        Check(Math.Abs(context.Sender.RttMin - 10.0f) < 0.01f, $"rtt min is {context.Sender.RttMin}, expected 10");
+        Check(Math.Abs(context.Sender.RttMax - 20.0f) < 0.01f, $"rtt max is {context.Sender.RttMax}, expected 20");
+        Check(Math.Abs(context.Sender.RttAvg - 15.0f) < 0.01f, $"rtt avg is {context.Sender.RttAvg}, expected 15");
+        Check(Math.Abs(context.Sender.JitterAvgVsMinRtt - 5.0f) < 0.01f, $"jitter average vs min rtt is {context.Sender.JitterAvgVsMinRtt}, expected 5");
+        Check(Math.Abs(context.Sender.JitterMaxVsMinRtt - 10.0f) < 0.01f, $"jitter max vs min rtt is {context.Sender.JitterMaxVsMinRtt}, expected 10");
+        Check(Math.Abs(context.Sender.JitterStddevVsAvgRtt - 5.0f) < 0.01f, $"jitter stddev vs avg rtt is {context.Sender.JitterStddevVsAvgRtt}, expected 5");
+    }
+
+    // ------------------------------------------------------------
+    // test_bandwidth_estimators
+
+    private static void TestBandwidthEstimators()
+    {
+        double time = 100.0;
+        const double deltaTime = 0.01;
+        const int numPackets = 8;
+        const int packetHeaderSize = 28;
+        const int wireHeaderBytes = 8;
+        const int payloadBytes = 100;
+        const int windowSamples = numPackets / 2;
+        const double windowSeconds = (windowSamples - 1) * deltaTime;
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = numPackets;
+        senderConfig.BandwidthSmoothingFactor = 1.0f;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.ReceivedPacketsBufferSize = numPackets;
+        receiverConfig.BandwidthSmoothingFactor = 1.0f;
+
+        context.Sender = new Endpoint(senderConfig, time);
+        context.Receiver = new Endpoint(receiverConfig, time);
+
+        byte[] packet = new byte[payloadBytes];
+
+        for (int i = 0; i < numPackets; ++i)
+        {
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+
+            context.Sender.SendPacket(packet);
+            context.Receiver.SendPacket(packet);
+
+            time += deltaTime;
+        }
+
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+
+        float sentExpected = (float)(windowSamples * (packetHeaderSize + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float receivedExpected = (float)(windowSamples * (packetHeaderSize + wireHeaderBytes + payloadBytes) / windowSeconds * 8.0 / 1000.0);
+        float ackedExpected = sentExpected;
+
+        Check(Math.Abs(context.Sender.SentBandwidthKbps - sentExpected) < 0.01f, $"sent bandwidth is {context.Sender.SentBandwidthKbps}, expected {sentExpected}");
+        Check(Math.Abs(context.Receiver.ReceivedBandwidthKbps - receivedExpected) < 0.01f, $"received bandwidth is {context.Receiver.ReceivedBandwidthKbps}, expected {receivedExpected}");
+        Check(Math.Abs(context.Sender.AckedBandwidthKbps - ackedExpected) < 0.01f, $"acked bandwidth is {context.Sender.AckedBandwidthKbps}, expected {ackedExpected}");
     }
 
     // ------------------------------------------------------------
@@ -1188,6 +1384,116 @@ internal static partial class Tests
 
         Check(context.Sender.GetAcks().Length > 0, "acks accumulate after reset");
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) > 0, "packets received after reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_endpoint_reset_clears_stats: reset zeroes every statistic getter
+
+    private static void TestEndpointResetClearsStats()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        for (int i = 0; i < 32; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.Update(time);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+            time += 0.05;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+        }
+
+        // stats accumulate before reset
+        Check(context.Sender.Rtt > 0.0f, "rtt accumulates before reset");
+
+        context.Sender.Reset();
+        context.Receiver.Reset();
+
+        Check(context.Sender.Rtt == 0.0f, "rtt cleared by reset");
+        Check(context.Sender.RttMin == 0.0f, "rtt_min cleared by reset");
+        Check(context.Sender.RttMax == 0.0f, "rtt_max cleared by reset");
+        Check(context.Sender.RttAvg == 0.0f, "rtt_avg cleared by reset");
+        Check(context.Sender.JitterAvgVsMinRtt == 0.0f, "jitter_avg cleared by reset");
+        Check(context.Sender.JitterMaxVsMinRtt == 0.0f, "jitter_max cleared by reset");
+        Check(context.Sender.JitterStddevVsAvgRtt == 0.0f, "jitter_stddev cleared by reset");
+        Check(context.Sender.PacketLoss == 0.0f, "packet_loss cleared by reset");
+        Check(context.Sender.SentBandwidthKbps == 0.0f, "sent_kbps cleared by reset");
+        Check(context.Sender.ReceivedBandwidthKbps == 0.0f, "received_kbps cleared by reset");
+        Check(context.Sender.AckedBandwidthKbps == 0.0f, "acked_kbps cleared by reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_min_large: the rtt minimum is decided by a sample count, not a
+    // sentinel, so a minimum of 10000 ms or more is reported instead of 0
+
+    private static void TestRttMinLarge()
+    {
+        double time = 0.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        double[] rttSeconds = { 10.0, 12.0, 20.0 };
+        foreach (double rtt in rttSeconds)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            time += rtt;
+            context.Sender.Update(time);
+            context.Receiver.Update(time);
+            context.Receiver.SendPacket(dummyPacket);
+
+            context.Sender.ClearAcks();
+            context.Receiver.ClearAcks();
+        }
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin == 10000.0f, "rtt_min reports 10000 ms when all samples are 10000 ms or more");
+    }
+
+    // ------------------------------------------------------------
+    // test_rtt_clamped_when_time_steps_back: an ack processed after the
+    // caller's clock moved backwards gives an rtt sample of 0, never negative
+
+    private static void TestRttClampedWhenTimeStepsBack()
+    {
+        double time = 100.0;
+
+        TestContext context = new TestContext();
+
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+
+        byte[] dummyPacket = new byte[8];
+
+        context.Sender.SendPacket(dummyPacket);
+
+        time -= 1.0;
+        context.Sender.Update(time);
+        context.Receiver.Update(time);
+        context.Receiver.SendPacket(dummyPacket);
+
+        Check(context.Sender.GetAcks().Length == 1, "the packet is acked");
+        Check(context.Sender.Rtt >= 0.0f, "rtt stays non-negative when time steps back");
+
+        context.Sender.Update(time);
+
+        Check(context.Sender.RttMin >= 0.0f, "rtt_min stays non-negative when time steps back");
+        Check(context.Sender.RttAvg >= 0.0f, "rtt_avg stays non-negative when time steps back");
     }
 
     // ------------------------------------------------------------
