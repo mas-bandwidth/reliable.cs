@@ -22,6 +22,13 @@
                                        processed packet (FNV-1a 64 of the bytes),
                                        per-iteration acks, and periodic + final
                                        counters and stats (float bit patterns).
+      empty_packet                     one receiver, six inputs in order: a
+                                       zero-length packet, {0}, {1},
+                                       max_packet_size+14 zero bytes, one byte
+                                       more than that, then a valid packet from
+                                       a sender. each line is the input, whether
+                                       it was refused, whether the process
+                                       callback ran, and the eleven counters.
 
     All randomness comes from the shared PRNG in an exactly specified draw order;
     the C# side replicates it draw for draw. rand() is never used.
@@ -32,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <limits.h>
 
 /* internal functions of reliable.c with external linkage */
 int reliable_write_packet_header( uint8_t * packet_data, uint16_t sequence, uint16_t ack, uint32_t ack_bits );
@@ -181,6 +189,229 @@ static void run_vectors( void )
     }
 
     reliable_endpoint_destroy( endpoint );
+}
+
+/* ---------------------------------------------------------------- */
+/* malformed mode                                                   */
+
+/* one hostile / boundary input per checklist item 5: zero length, oversize,
+   truncated headers, bad fragment counts. each vector is fed to a fresh
+   endpoint; the line reports what the endpoint did and the eleven counters.
+   the C# twin is Reliable.Compat.Program.RunMalformed. identical text. */
+
+#define MALFORMED_MAX_PACKET 100
+
+static const char * counter_names[11] =
+{
+    "sent", "received", "acked", "stale", "invalid",
+    "too_large_send", "too_large_receive", "fragments_sent",
+    "fragments_received", "fragments_invalid", "duplicate",
+};
+
+static uint16_t malformed_delivered_sequence;
+static int malformed_delivered_length;
+static int malformed_delivered;
+
+static int malformed_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) packet_data;
+    malformed_delivered = 1;
+    malformed_delivered_sequence = sequence;
+    malformed_delivered_length = packet_bytes;
+    return 1;
+}
+
+static void malformed_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static void run_malformed( void )
+{
+    struct reliable_config_t config;
+    reliable_default_config( &config );
+    reliable_copy_string( config.name, "malformed", sizeof( config.name ) );
+    config.max_packet_size = MALFORMED_MAX_PACKET;
+    config.fragment_above = 50;
+    config.fragment_size = 50;
+    config.max_fragments = 16;
+    config.transmit_packet_function = malformed_transmit;
+    config.process_packet_function = malformed_process;
+
+    uint8_t oversize[MALFORMED_MAX_PACKET + 16];
+    memset( oversize, 0, sizeof( oversize ) );
+
+    const struct { const uint8_t * data; int bytes; const char * label; } vectors[] =
+    {
+        { (const uint8_t *) "",              0,  "zero-length" },
+        { oversize,                          sizeof( oversize ), "oversize" },
+        { (const uint8_t *) "\x00",           1,  "prefix-only" },
+        { (const uint8_t *) "\x00\x01",       2,  "seq-truncated" },
+        { (const uint8_t *) "\x20\x01\x02",   3,  "ack-diff-missing" },
+        { (const uint8_t *) "\x01\x00\x01",   3,  "fragment-short" },
+        { (const uint8_t *) "\x01\x00\x00\x05\x02", 5, "fragment-id-range" },
+        { (const uint8_t *) "\x01\x00\x00\x00\xFF", 5, "fragment-too-many" },
+        { (const uint8_t *) "\x01\x00\x00\x00\x00", 5, "fragment-no-header" },
+        { (const uint8_t *) "\x00\x00\x00\x00\x00", 5, "valid-minimal" },
+    };
+
+    int num_vectors = (int) ( sizeof( vectors ) / sizeof( vectors[0] ) );
+
+    for ( int n = 0; n < num_vectors; n++ )
+    {
+        struct reliable_endpoint_t * endpoint = reliable_endpoint_create( &config, 100.0 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+
+        uint64_t before[RELIABLE_ENDPOINT_NUM_COUNTERS];
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+            before[i] = counters[i];
+
+        malformed_delivered = 0;
+        malformed_delivered_sequence = 0;
+        malformed_delivered_length = 0;
+
+        reliable_endpoint_receive_packet( endpoint, (uint8_t *) vectors[n].data, vectors[n].bytes );
+
+        const char * changed = "none";
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        {
+            if ( counters[i] != before[i] )
+            {
+                changed = counter_names[i];
+                break;
+            }
+        }
+
+        printf( "%d %s %s ", n, malformed_delivered ? "accepted" : "refused", changed );
+        if ( malformed_delivered )
+            printf( "%u %d", malformed_delivered_sequence, malformed_delivered_length );
+        else
+            printf( "-" );
+        for ( int i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+            printf( " %" PRIu64, counters[i] );
+        printf( "\n" );
+
+        reliable_endpoint_destroy( endpoint );
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* empty_packet mode                                                */
+
+/* one receiver, six inputs, in order: a zero-length packet, a one-byte
+   packet {0}, a one-byte packet {1}, max_packet_size + 14 zero bytes, one
+   byte more than that, then a valid packet from a sender. each line is
+   <input> <refused|accepted> <process callback ran 0|1> <eleven counters>.
+   counters accumulate on that same receiver. the C# twin is RunEmptyPacket.
+   identical text. */
+
+static int empty_process_ran;
+static uint8_t empty_sent[64];
+static int empty_sent_bytes;
+
+static int empty_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    empty_process_ran = 1;
+    return 1;
+}
+
+static int empty_process_ignore( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static void empty_transmit_ignore( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static void empty_transmit_capture( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence;
+    if ( packet_bytes <= 0 || packet_bytes > (int) sizeof( empty_sent ) )
+    {
+        fprintf( stderr, "empty_packet: sent packet does not fit (%d)\n", packet_bytes );
+        exit( 1 );
+    }
+    memcpy( empty_sent, packet_data, (size_t) packet_bytes );
+    empty_sent_bytes = packet_bytes;
+}
+
+static void empty_print( const char * label, struct reliable_endpoint_t * endpoint )
+{
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    printf( "%s %s %d", label, empty_process_ran ? "accepted" : "refused", empty_process_ran );
+    int i;
+    for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
+}
+
+static void empty_feed( const char * label, struct reliable_endpoint_t * endpoint, uint8_t * data, int bytes )
+{
+    empty_process_ran = 0;
+    reliable_endpoint_receive_packet( endpoint, data, bytes );
+    empty_print( label, endpoint );
+}
+
+static void run_empty_packet( void )
+{
+    struct reliable_config_t receiver_config;
+    reliable_default_config( &receiver_config );
+    reliable_copy_string( receiver_config.name, "receiver", sizeof( receiver_config.name ) );
+    receiver_config.transmit_packet_function = empty_transmit_ignore;
+    receiver_config.process_packet_function = empty_process;
+
+    struct reliable_config_t sender_config;
+    reliable_default_config( &sender_config );
+    reliable_copy_string( sender_config.name, "sender", sizeof( sender_config.name ) );
+    sender_config.transmit_packet_function = empty_transmit_capture;
+    sender_config.process_packet_function = empty_process_ignore;
+
+    struct reliable_endpoint_t * receiver = reliable_endpoint_create( &receiver_config, 0.0 );
+    struct reliable_endpoint_t * sender = reliable_endpoint_create( &sender_config, 0.0 );
+    if ( !receiver || !sender )
+    {
+        fprintf( stderr, "empty_packet: endpoint create failed\n" );
+        exit( 1 );
+    }
+
+    int max_packet_size = receiver_config.max_packet_size;
+    int limit = max_packet_size + RELIABLE_MAX_PACKET_HEADER_BYTES + RELIABLE_FRAGMENT_HEADER_BYTES;
+    uint8_t * zeros = (uint8_t *) calloc( (size_t) limit + 1, 1 );
+    if ( !zeros )
+    {
+        fprintf( stderr, "empty_packet: out of memory\n" );
+        exit( 1 );
+    }
+
+    uint8_t sentinel = 0x2A;
+    empty_feed( "zero-length", receiver, &sentinel, 0 );
+
+    uint8_t byte0 = 0;
+    empty_feed( "byte-0", receiver, &byte0, 1 );
+
+    uint8_t byte1 = 1;
+    empty_feed( "byte-1", receiver, &byte1, 1 );
+
+    empty_feed( "max-plus-14", receiver, zeros, limit );
+    empty_feed( "max-plus-15", receiver, zeros, limit + 1 );
+
+    uint8_t payload = 0x11;
+    empty_sent_bytes = 0;
+    reliable_endpoint_send_packet( sender, &payload, 1 );
+    if ( empty_sent_bytes <= 0 )
+    {
+        fprintf( stderr, "empty_packet: sender produced no packet\n" );
+        exit( 1 );
+    }
+    empty_feed( "valid", receiver, empty_sent, empty_sent_bytes );
+
+    free( zeros );
+    reliable_endpoint_destroy( receiver );
+    reliable_endpoint_destroy( sender );
 }
 
 /* ---------------------------------------------------------------- */
@@ -509,6 +740,504 @@ static void run_scenario( const char * profile, uint64_t seed, int iterations )
 }
 
 /* ---------------------------------------------------------------- */
+/* config_refusal mode                                              */
+/*
+    Differential pins for the config validation carried from the C reference
+    (R3: sequence-buffer sizes are powers of two no larger than 16384; R4: the
+    header-plus-packet bound is computed in 64 bits). One line per input, byte
+    for byte identical to Compat.cs: `<field> <value> <created|refused>`, and
+    for a created config an `ack <n>` line after a one-byte send is acked by a
+    peer through the in-memory callbacks.
+*/
+
+static struct reliable_endpoint_t * cfg_sender;
+static struct reliable_endpoint_t * cfg_receiver;
+
+static void cfg_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) sequence;
+    if ( id == 0 )
+        reliable_endpoint_receive_packet( cfg_receiver, packet_data, packet_bytes );
+    else
+        reliable_endpoint_receive_packet( cfg_sender, packet_data, packet_bytes );
+}
+
+static int cfg_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static const char * cfg_field_names[3] =
+{
+    "sent_packets_buffer_size",
+    "received_packets_buffer_size",
+    "fragment_reassembly_buffer_size",
+};
+
+static void cfg_set_field( struct reliable_config_t * config, int field, int value )
+{
+    if ( field == 0 )
+        config->sent_packets_buffer_size = value;
+    else if ( field == 1 )
+        config->received_packets_buffer_size = value;
+    else
+        config->fragment_reassembly_buffer_size = value;
+}
+
+static void cfg_ack_test( int field, int value )
+{
+    struct reliable_config_t sender_config, receiver_config;
+    reliable_default_config( &sender_config );
+    reliable_copy_string( sender_config.name, "sender", sizeof( sender_config.name ) );
+    sender_config.id = 0;
+    sender_config.transmit_packet_function = cfg_transmit;
+    sender_config.process_packet_function = cfg_process;
+    cfg_set_field( &sender_config, field, value );
+
+    reliable_default_config( &receiver_config );
+    reliable_copy_string( receiver_config.name, "receiver", sizeof( receiver_config.name ) );
+    receiver_config.id = 1;
+    receiver_config.transmit_packet_function = cfg_transmit;
+    receiver_config.process_packet_function = cfg_process;
+
+    cfg_sender = reliable_endpoint_create( &sender_config, 100.0 );
+    cfg_receiver = reliable_endpoint_create( &receiver_config, 100.0 );
+    if ( !cfg_sender || !cfg_receiver )
+    {
+        fprintf( stderr, "config_refusal: ack pair create failed\n" );
+        exit( 1 );
+    }
+
+    uint8_t packet[1];
+    memset( packet, 0, sizeof( packet ) );
+
+    reliable_endpoint_send_packet( cfg_sender, packet, sizeof( packet ) );
+    reliable_endpoint_update( cfg_sender, 100.1 );
+    reliable_endpoint_update( cfg_receiver, 100.1 );
+    reliable_endpoint_send_packet( cfg_receiver, packet, sizeof( packet ) );
+    reliable_endpoint_update( cfg_sender, 100.1 );
+
+    int num_acks = 0;
+    reliable_endpoint_get_acks( cfg_sender, &num_acks );
+    printf( "ack %d\n", num_acks );
+
+    reliable_endpoint_destroy( cfg_sender );
+    reliable_endpoint_destroy( cfg_receiver );
+    cfg_sender = NULL;
+    cfg_receiver = NULL;
+}
+
+static void run_config_refusal( void )
+{
+    static const int values[] = { 0, 1, 2, 3, 100, 255, 256, 257, 16383, 16384, 16385, 32768, 65535, 65536, 65537 };
+    int num_values = (int) ( sizeof( values ) / sizeof( values[0] ) );
+
+    int field;
+    for ( field = 0; field < 3; field++ )
+    {
+        int v;
+        for ( v = 0; v < num_values; v++ )
+        {
+            int value = values[v];
+
+            struct reliable_config_t config;
+            reliable_default_config( &config );
+            reliable_copy_string( config.name, "cfg", sizeof( config.name ) );
+            config.transmit_packet_function = cfg_transmit;
+            config.process_packet_function = cfg_process;
+            cfg_set_field( &config, field, value );
+
+            struct reliable_endpoint_t * endpoint = reliable_endpoint_create( &config, 0.0 );
+
+            if ( endpoint )
+            {
+                printf( "%s %d created\n", cfg_field_names[field], value );
+                reliable_endpoint_destroy( endpoint );
+                cfg_ack_test( field, value );
+            }
+            else
+            {
+                printf( "%s %d refused\n", cfg_field_names[field], value );
+            }
+        }
+    }
+
+    /* R4: packet_header_size + max_packet_size + 9 + 5 must not exceed INT_MAX.
+       the three edge configs vary only the header and max packet size, so the
+       fragment-cover bound (a large max at the default 16 x 1024 fragments)
+       refuses each before any allocation; that refusal, not the header-plus-
+       packet arithmetic, is what the differential pins for these inputs. */
+    static const struct { int header; int max_packet_size; } r4[] =
+    {
+        { 28, INT_MAX - 14 - 28 },
+        { 28, INT_MAX - 14 - 28 + 1 },
+        { 9,  INT_MAX - 23 },
+    };
+
+    int i;
+    for ( i = 0; i < (int) ( sizeof( r4 ) / sizeof( r4[0] ) ); i++ )
+    {
+        struct reliable_config_t config;
+        reliable_default_config( &config );
+        reliable_copy_string( config.name, "cfg", sizeof( config.name ) );
+        config.transmit_packet_function = cfg_transmit;
+        config.process_packet_function = cfg_process;
+        config.packet_header_size = r4[i].header;
+        config.max_packet_size = r4[i].max_packet_size;
+
+        struct reliable_endpoint_t * endpoint = reliable_endpoint_create( &config, 0.0 );
+        printf( "header_plus_max %d %d %s\n", r4[i].header, r4[i].max_packet_size, endpoint ? "created" : "refused" );
+        if ( endpoint )
+        {
+            reliable_endpoint_destroy( endpoint );
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* hardening mode                                                   */
+/*
+    Differential pins for the hardening carried from the C 1.4.x releases:
+    Reset clears every statistic, the rtt minimum is decided by a sample count
+    (so a minimum of 10000 ms or more is reported), and the reassembly buffer
+    is zeroed. One line per step, byte for byte identical to Compat.cs; every
+    float is printed as its raw 32-bit pattern.
+*/
+
+static struct reliable_endpoint_t * hw_sender;
+static struct reliable_endpoint_t * hw_receiver;
+static int hw_drop;
+
+static void hw_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) sequence;
+    if ( hw_drop )
+    {
+        hw_drop = 0;
+        return;
+    }
+    if ( id == 0 )
+        reliable_endpoint_receive_packet( hw_receiver, packet_data, packet_bytes );
+    else
+        reliable_endpoint_receive_packet( hw_sender, packet_data, packet_bytes );
+}
+
+static int hw_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static void hw_pair( double time )
+{
+    struct reliable_config_t sender_config, receiver_config;
+    reliable_default_config( &sender_config );
+    reliable_copy_string( sender_config.name, "sender", sizeof( sender_config.name ) );
+    sender_config.id = 0;
+    sender_config.transmit_packet_function = hw_transmit;
+    sender_config.process_packet_function = hw_process;
+
+    reliable_default_config( &receiver_config );
+    reliable_copy_string( receiver_config.name, "receiver", sizeof( receiver_config.name ) );
+    receiver_config.id = 1;
+    receiver_config.transmit_packet_function = hw_transmit;
+    receiver_config.process_packet_function = hw_process;
+
+    hw_sender = reliable_endpoint_create( &sender_config, time );
+    hw_receiver = reliable_endpoint_create( &receiver_config, time );
+    if ( !hw_sender || !hw_receiver )
+    {
+        fprintf( stderr, "hardening: pair create failed\n" );
+        exit( 1 );
+    }
+}
+
+static void hw_destroy( void )
+{
+    reliable_endpoint_destroy( hw_sender );
+    reliable_endpoint_destroy( hw_receiver );
+    hw_sender = NULL;
+    hw_receiver = NULL;
+}
+
+static void print_hardening_line( const char * step, struct reliable_endpoint_t * endpoint )
+{
+    float sent_bw, received_bw, acked_bw;
+    reliable_endpoint_bandwidth( endpoint, &sent_bw, &received_bw, &acked_bw );
+    printf( "%s rtt %08x rtt_min %08x rtt_max %08x rtt_avg %08x jitter_avg %08x jitter_max %08x jitter_stddev %08x loss %08x sent_kbps %08x received_kbps %08x acked_kbps %08x\n",
+        step,
+        float_bits( reliable_endpoint_rtt( endpoint ) ),
+        float_bits( reliable_endpoint_rtt_min( endpoint ) ),
+        float_bits( reliable_endpoint_rtt_max( endpoint ) ),
+        float_bits( reliable_endpoint_rtt_avg( endpoint ) ),
+        float_bits( reliable_endpoint_jitter_avg_vs_min_rtt( endpoint ) ),
+        float_bits( reliable_endpoint_jitter_max_vs_min_rtt( endpoint ) ),
+        float_bits( reliable_endpoint_jitter_stddev_vs_avg_rtt( endpoint ) ),
+        float_bits( reliable_endpoint_packet_loss( endpoint ) ),
+        float_bits( sent_bw ),
+        float_bits( received_bw ),
+        float_bits( acked_bw ) );
+}
+
+static void run_hardening( void )
+{
+    double time = 100.0;
+    hw_pair( time );
+
+    uint8_t packet[64];
+    int i;
+    for ( i = 0; i < 200; i++ )
+    {
+        memset( packet, (uint8_t) i, sizeof( packet ) );
+
+        hw_drop = ( i % 10 == 0 );
+        reliable_endpoint_send_packet( hw_sender, packet, 8 + ( i % 40 ) );
+
+        time += 0.016;
+        reliable_endpoint_update( hw_sender, time );
+        reliable_endpoint_update( hw_receiver, time );
+
+        hw_drop = ( i % 15 == 0 );
+        reliable_endpoint_send_packet( hw_receiver, packet, 8 + ( ( i * 7 ) % 40 ) );
+
+        time += 0.016;
+        reliable_endpoint_update( hw_sender, time );
+        reliable_endpoint_update( hw_receiver, time );
+
+        reliable_endpoint_clear_acks( hw_sender );
+        reliable_endpoint_clear_acks( hw_receiver );
+    }
+
+    print_hardening_line( "before_reset", hw_sender );
+
+    reliable_endpoint_reset( hw_sender );
+    reliable_endpoint_reset( hw_receiver );
+    print_hardening_line( "after_reset", hw_sender );
+
+    hw_destroy();
+
+    /* the rtt minimum is decided by a sample count, not a sentinel: samples of
+       10000, 12000 and 20000 ms must report a minimum of 10000, not 0 */
+    time = 100.0;
+    hw_pair( time );
+
+    uint8_t tiny[8];
+    memset( tiny, 0, sizeof( tiny ) );
+
+    reliable_endpoint_send_packet( hw_sender, tiny, sizeof( tiny ) );
+    time += 10.0;
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_update( hw_receiver, time );
+    reliable_endpoint_send_packet( hw_receiver, tiny, sizeof( tiny ) );
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_clear_acks( hw_sender );
+    reliable_endpoint_clear_acks( hw_receiver );
+
+    reliable_endpoint_send_packet( hw_sender, tiny, sizeof( tiny ) );
+    time += 12.0;
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_update( hw_receiver, time );
+    reliable_endpoint_send_packet( hw_receiver, tiny, sizeof( tiny ) );
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_clear_acks( hw_sender );
+    reliable_endpoint_clear_acks( hw_receiver );
+
+    reliable_endpoint_send_packet( hw_sender, tiny, sizeof( tiny ) );
+    time += 20.0;
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_update( hw_receiver, time );
+    reliable_endpoint_send_packet( hw_receiver, tiny, sizeof( tiny ) );
+    reliable_endpoint_update( hw_sender, time );
+    reliable_endpoint_clear_acks( hw_sender );
+    reliable_endpoint_clear_acks( hw_receiver );
+
+    print_hardening_line( "large_rtt", hw_sender );
+
+    hw_destroy();
+
+    /* a fresh endpoint before any sample reports zero everywhere */
+    hw_pair( 0.0 );
+    print_hardening_line( "fresh", hw_sender );
+    hw_destroy();
+}
+
+/* ---------------------------------------------------------------- */
+/* byte_budget mode                                                 */
+/*
+    Differential pins for the unfinished-reassembly byte budget. A first
+    fragment that would push the live reassembly bytes past the configured
+    budget is refused (counted NUM_FRAGMENTS_INVALID); 0 = unbounded. The
+    endpoint's allocator is replaced with a counting allocator, so the harness
+    can report the reassembly bytes it holds (outstanding minus the create-time
+    baseline). Each crafted fragment prints one line: step, refused|accepted,
+    the outstanding reassembly bytes, then the eleven counters. byte for byte
+    identical to Compat.cs.
+*/
+
+#define BB_MAX_ALLOCATIONS 4096
+
+struct bb_alloc_t
+{
+    void * pointers[BB_MAX_ALLOCATIONS];
+    size_t bytes[BB_MAX_ALLOCATIONS];
+    size_t outstanding;
+};
+
+static void * bb_allocate( void * context, size_t bytes )
+{
+    struct bb_alloc_t * bb = (struct bb_alloc_t*) context;
+    void * allocation = malloc( bytes );
+    if ( !allocation )
+        return NULL;
+    int i;
+    for ( i = 0; i < BB_MAX_ALLOCATIONS; ++i )
+        if ( bb->pointers[i] == NULL )
+            break;
+    if ( i >= BB_MAX_ALLOCATIONS )
+        abort();
+    bb->pointers[i] = allocation;
+    bb->bytes[i] = bytes;
+    bb->outstanding += bytes;
+    return allocation;
+}
+
+static void bb_free( void * context, void * pointer )
+{
+    struct bb_alloc_t * bb = (struct bb_alloc_t*) context;
+    int i;
+    for ( i = 0; i < BB_MAX_ALLOCATIONS; ++i )
+        if ( bb->pointers[i] == pointer )
+            break;
+    if ( i >= BB_MAX_ALLOCATIONS )
+        abort();
+    bb->outstanding -= bb->bytes[i];
+    bb->pointers[i] = NULL;
+    bb->bytes[i] = 0;
+    free( pointer );
+}
+
+static void bb_transmit( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+}
+
+static int bb_process( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) id; (void) sequence; (void) packet_data; (void) packet_bytes;
+    return 1;
+}
+
+static struct bb_alloc_t bb_alloc_state;
+
+static struct reliable_endpoint_t * bb_endpoint( int budget )
+{
+    struct reliable_config_t config;
+    reliable_default_config( &config );
+    reliable_copy_string( config.name, "byte_budget", sizeof( config.name ) );
+    config.max_packet_size = 16384;
+    config.fragment_above = 500;
+    config.fragment_size = 1024;
+    config.max_fragments = 16;
+    config.fragment_reassembly_byte_budget = budget;
+    config.allocator_context = &bb_alloc_state;
+    config.allocate_function = bb_allocate;
+    config.free_function = bb_free;
+    config.transmit_packet_function = bb_transmit;
+    config.process_packet_function = bb_process;
+    return reliable_endpoint_create( &config, 100.0 );
+}
+
+/* a fragment: prefix 1, sequence LE, fragment id, count-1, then 0x5A payload.
+   fragment 0 embeds the canonical packet header, exactly like the sender. */
+static int bb_build_fragment( uint8_t * buffer, uint16_t sequence, int fragment_id, int num_fragments, int payload_bytes )
+{
+    int p = 0;
+    buffer[p++] = 1;
+    buffer[p++] = (uint8_t) ( sequence & 0xFF );
+    buffer[p++] = (uint8_t) ( sequence >> 8 );
+    buffer[p++] = (uint8_t) fragment_id;
+    buffer[p++] = (uint8_t) ( num_fragments - 1 );
+    if ( fragment_id == 0 )
+        p += reliable_write_packet_header( buffer + p, sequence, 0xFFFF, 0 );
+    int i;
+    for ( i = 0; i < payload_bytes; i++ )
+        buffer[p++] = 0x5A;
+    return p;
+}
+
+static void bb_report( const char * step, int refused, struct reliable_endpoint_t * endpoint, size_t baseline )
+{
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+    printf( "%s %s %lu", step, refused ? "refused" : "accepted",
+        (unsigned long) ( bb_alloc_state.outstanding - baseline ) );
+    int i;
+    for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; i++ )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
+}
+
+static void bb_run_budget( int budget, const char * label )
+{
+    memset( &bb_alloc_state, 0, sizeof( bb_alloc_state ) );
+    struct reliable_endpoint_t * endpoint = bb_endpoint( budget );
+    size_t baseline = bb_alloc_state.outstanding;
+
+    uint8_t fragment[2048];
+
+    int seq;
+    for ( seq = 0; seq < 64; seq++ )
+    {
+        int fragment_bytes = bb_build_fragment( fragment, (uint16_t) seq, 15, 16, 1024 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+        uint64_t invalid_before = counters[9];
+        reliable_endpoint_receive_packet( endpoint, fragment, fragment_bytes );
+        char step[16];
+        snprintf( step, sizeof( step ), "%s-%d", label, seq );
+        bb_report( step, counters[9] != invalid_before, endpoint, baseline );
+    }
+
+    uint8_t genuine[16];
+    int h = reliable_write_packet_header( genuine, 0, 0xFFFF, 0 );
+    genuine[h] = 0;
+    reliable_endpoint_receive_packet( endpoint, genuine, h + 1 );
+    char step[16];
+    snprintf( step, sizeof( step ), "%s-genuine", label );
+    bb_report( step, 0, endpoint, baseline );
+
+    reliable_endpoint_destroy( endpoint );
+}
+
+static void run_byte_budget( void )
+{
+    /* 64 crafted last fragments at 64 KB, then the same unbounded (0) */
+    bb_run_budget( 64 * 1024, "b64k" );
+    bb_run_budget( 0, "b0" );
+
+    /* a complete fragmented packet (1024 + 512 = 1.5 x fragment_size) within the budget */
+    {
+        memset( &bb_alloc_state, 0, sizeof( bb_alloc_state ) );
+        struct reliable_endpoint_t * endpoint = bb_endpoint( 64 * 1024 );
+        size_t baseline = bb_alloc_state.outstanding;
+
+        uint8_t fragment[2048];
+
+        int n0 = bb_build_fragment( fragment, 0, 0, 2, 1024 );
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+        uint64_t invalid_before = counters[9];
+        reliable_endpoint_receive_packet( endpoint, fragment, n0 );
+        bb_report( "complete-0", counters[9] != invalid_before, endpoint, baseline );
+
+        int n1 = bb_build_fragment( fragment, 0, 1, 2, 512 );
+        reliable_endpoint_receive_packet( endpoint, fragment, n1 );
+        bb_report( "complete-1", 0, endpoint, baseline );
+
+        reliable_endpoint_destroy( endpoint );
+    }
+}
+
+
+/* ---------------------------------------------------------------- */
 
 int main( int argc, char ** argv )
 {
@@ -522,13 +1251,33 @@ int main( int argc, char ** argv )
     {
         run_vectors();
     }
+    else if ( argc >= 2 && strcmp( argv[1], "malformed" ) == 0 )
+    {
+        run_malformed();
+    }
+    else if ( argc >= 2 && strcmp( argv[1], "empty_packet" ) == 0 )
+    {
+        run_empty_packet();
+    }
+    else if ( argc >= 2 && strcmp( argv[1], "config_refusal" ) == 0 )
+    {
+        run_config_refusal();
+    }
+    else if ( argc >= 2 && strcmp( argv[1], "hardening" ) == 0 )
+    {
+        run_hardening();
+    }
+    else if ( argc >= 2 && strcmp( argv[1], "byte_budget" ) == 0 )
+    {
+        run_byte_budget();
+    }
     else if ( argc >= 5 && strcmp( argv[1], "scenario" ) == 0 )
     {
         run_scenario( argv[2], strtoull( argv[3], NULL, 10 ), atoi( argv[4] ) );
     }
     else
     {
-        fprintf( stderr, "usage: compat vectors | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
+        fprintf( stderr, "usage: compat vectors | compat malformed | compat empty_packet | compat config_refusal | compat hardening | compat byte_budget | compat scenario <clean|lossy|hostile|wrap> <seed> <iterations>\n" );
         return 2;
     }
 
