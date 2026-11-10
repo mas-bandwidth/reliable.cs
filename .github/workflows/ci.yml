@@ -16,13 +16,15 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.configuration }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # Debug compiles and runs the Debug.Assert invariants in src/Reliable.cs
+        configuration: [Release, Debug]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -33,16 +35,16 @@ jobs:
             8.0.x
             10.0.x
       - name: Build (both TFMs, warnings are errors)
-        run: dotnet build tests/Tests.csproj -c Release
+        run: dotnet build tests/Tests.csproj -c ${{ matrix.configuration }}
       - name: Tests (net10.0)
-        run: dotnet run -c Release --project tests/Tests.csproj -f net10.0 --no-build
+        run: dotnet run -c ${{ matrix.configuration }} --project tests/Tests.csproj -f net10.0 --no-build
       - name: Tests (net8.0, the LTS leg)
-        run: dotnet run -c Release --project tests/Tests.csproj -f net8.0 --no-build
+        run: dotnet run -c ${{ matrix.configuration }} --project tests/Tests.csproj -f net8.0 --no-build
       # no test framework, so the runner's exit code is the whole verdict; the
       # compat harness is exercised for real in the c-interop job — this keeps
       # it compiling on both OSes
       - name: Build the compat harness
-        run: dotnet build compat/Compat.csproj -c Release
+        run: dotnet build compat/Compat.csproj -c ${{ matrix.configuration }}
 
   c-interop:
     name: C wire + behavior compatibility (${{ matrix.os }})
@@ -63,9 +65,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           # bump deliberately, in its own commit. the golden pins in
-          # tests/Tests.cs were generated at this same tag.
+          # tests/Tests.cs were generated at v1.4.0; the vectors gate shows
+          # this tag emits the same bytes.
           repository: mas-bandwidth/reliable
-          ref: v1.4.0
+          ref: v1.4.5
           path: c-reliable
       - uses: actions/setup-dotnet@v6
         with:
