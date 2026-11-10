@@ -8,7 +8,9 @@
 */
 
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
+using System.Reflection;
 using Reliable;
 
 namespace Reliable.Tests;
@@ -204,6 +206,129 @@ internal static partial class Tests
             Check(sink.GetCounter(EndpointCounter.NumPacketsTooLargeToReceive) == 1, "oversized payload rejected");
             Check(processed() == 0, "oversized payload not processed");
         }
+    }
+
+    private static void TestFragmentReassemblyStartsClean()
+    {
+        static byte[] BuildFragment(ushort sequence, int fragmentId, int numFragments, int dataBytes)
+        {
+            byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + dataBytes];
+            int p = 0;
+            buffer[p++] = 1;
+            BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
+            p += 2;
+            buffer[p++] = (byte)fragmentId;
+            buffer[p++] = (byte)(numFragments - 1);
+            if (fragmentId == 0)
+            {
+                p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, 0xFFFF, 0);
+            }
+            for (int i = 0; i < dataBytes; i++)
+            {
+                buffer[p++] = (byte)(i + sequence);
+            }
+            return buffer.AsSpan(0, p).ToArray();
+        }
+
+        const int fragmentSize = 500;
+        const int numFragments = 2;
+        const int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * fragmentSize;
+
+        byte[][] dirty = new byte[8][];
+        for (int i = 0; i < dirty.Length; i++)
+        {
+            dirty[i] = ArrayPool<byte>.Shared.Rent(packetBufferSize);
+            Array.Fill(dirty[i], (byte)0xFF);
+        }
+        for (int i = dirty.Length - 1; i >= 0; i--)
+        {
+            ArrayPool<byte>.Shared.Return(dirty[i]);
+        }
+
+        int processed = 0;
+        byte[]? delivered = null;
+        Endpoint receiver = new Endpoint(new EndpointConfig
+        {
+            Name = "clean",
+            MaxPacketSize = 8000,
+            FragmentAbove = fragmentSize,
+            FragmentSize = fragmentSize,
+            MaxFragments = 16,
+            TransmitPacket = (id, sequence, packetData) => { },
+            ProcessPacket = (id, sequence, packetData) =>
+            {
+                processed++;
+                delivered = packetData.ToArray();
+                return true;
+            },
+        }, 100.0);
+
+        const ushort packetSequence = 7;
+        const int lastBytes = 124;
+        receiver.ReceivePacket(BuildFragment(packetSequence, 1, numFragments, lastBytes));
+
+        FieldInfo reassemblyField = typeof(Endpoint).GetField("_fragmentReassembly", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        object reassemblyBuffer = reassemblyField.GetValue(receiver)!;
+        MethodInfo find = reassemblyBuffer.GetType().GetMethod("Find", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
+        int index = (int)find.Invoke(reassemblyBuffer, new object[] { packetSequence })!;
+        Check(index >= 0, "reassembly slot exists after the first fragment");
+        MethodInfo entryAt = reassemblyBuffer.GetType().GetMethod("EntryAt", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
+        object entry = entryAt.Invoke(reassemblyBuffer, new object[] { index })!;
+        FieldInfo packetDataField = entry.GetType().GetField("PacketData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+        byte[] buffer = (byte[])packetDataField.GetValue(entry)!;
+
+        Check(buffer.Length >= packetBufferSize, "rented reassembly buffer is large enough");
+        int dataOffset = Wire.MaxPacketHeaderBytes + fragmentSize;
+        for (int i = 0; i < dataOffset; i++)
+        {
+            Check(buffer[i] == 0, $"reassembly buffer byte {i} is clean before fragment 0 arrives");
+        }
+        for (int i = dataOffset + lastBytes; i < packetBufferSize; i++)
+        {
+            Check(buffer[i] == 0, $"reassembly buffer byte {i} is clean past the stored fragment");
+        }
+
+        receiver.ReceivePacket(BuildFragment(packetSequence, 0, numFragments, fragmentSize));
+
+        Check(processed == 1, "fragmented packet delivered once");
+        Check(delivered != null && delivered.Length == fragmentSize + lastBytes, "delivered payload length");
+        for (int i = 0; i < fragmentSize + lastBytes; i++)
+        {
+            byte expected = (byte)((i < fragmentSize ? i : i - fragmentSize) + packetSequence);
+            Check(delivered![i] == expected, $"delivered payload byte {i} is the fragment data");
+        }
+    }
+
+    private static void TestStoreFragmentDataBounds()
+    {
+        const int fragmentSize = 500;
+        const int numFragments = 2;
+        const int packetBufferSize = Wire.MaxPacketHeaderBytes + numFragments * fragmentSize;
+
+        byte[] packetData = new byte[packetBufferSize];
+        Array.Fill(packetData, (byte)0xAA);
+        Endpoint.FragmentReassemblyData reassembly = new Endpoint.FragmentReassemblyData
+        {
+            NumFragmentsTotal = numFragments,
+            PacketData = packetData,
+        };
+
+        byte[] oversized = new byte[fragmentSize + 1];
+        bool stored = Endpoint.StoreFragmentData(ref reassembly, 0, 0xFFFF, 0, numFragments - 1, fragmentSize, oversized);
+        Check(!stored, "out of bounds fragment is not stored");
+        for (int i = 0; i < packetBufferSize; i++)
+        {
+            Check(packetData[i] == 0xAA, $"out of bounds fragment writes no byte {i}");
+        }
+
+        byte[] fragment = new byte[fragmentSize];
+        fragment[0] = 0x11;
+        fragment[fragmentSize - 1] = 0x22;
+        stored = Endpoint.StoreFragmentData(ref reassembly, 0, 0xFFFF, 0, numFragments - 1, fragmentSize, fragment);
+        Check(stored, "in bounds fragment is stored");
+        Check(packetData[Wire.MaxPacketHeaderBytes + fragmentSize] == 0x11, "in bounds fragment start is written");
+        Check(packetData[Wire.MaxPacketHeaderBytes + 2 * fragmentSize - 1] == 0x22, "in bounds fragment end is written");
+        Check(reassembly.PacketBytes == 2 * fragmentSize, "stored fragment sets the packet byte count");
     }
 
     // ------------------------------------------------------------

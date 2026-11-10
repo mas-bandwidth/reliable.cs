@@ -85,6 +85,8 @@ internal static partial class Tests
         // C#-specific: hostile input, API misuse, allocation discipline
         RunTest("test_hostile_truncated_headers", TestHostileTruncatedHeaders);
         RunTest("test_hostile_fragments", TestHostileFragments);
+        RunTest("test_fragment_reassembly_starts_clean", TestFragmentReassemblyStartsClean);
+        RunTest("test_store_fragment_data_bounds", TestStoreFragmentDataBounds);
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
         RunTest("test_config_validation", TestConfigValidation);
