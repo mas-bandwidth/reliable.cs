@@ -13,6 +13,8 @@
 */
 
 using System;
+using System.Buffers.Binary;
+using System.Collections.Generic;
 using Reliable;
 
 namespace Reliable.Tests;
@@ -88,6 +90,7 @@ internal static partial class Tests
         RunTest("test_hostile_parser_fuzz", TestHostileParserFuzz);
         RunTest("test_process_reject_redelivery", TestProcessRejectRedelivery);
         RunTest("test_config_validation", TestConfigValidation);
+        RunTest("test_receive_drops_log_at_debug", TestReceiveDropsLogAtDebug);
         RunTest("test_zero_allocation", TestZeroAllocation);
         RunTest("test_fuzz_script", TestFuzzScript);
 
@@ -1149,5 +1152,105 @@ internal static partial class Tests
         ulong doubleProductPlusAdd = BitConverter.DoubleToUInt64Bits(da * db + dc);
         Check(doubleProductPlusAdd == 0x0000000000000000ul,
             $"double a*b+c must round twice, got 0x{doubleProductPlusAdd:x16} (fused/FMA gives 0x3c90000000000000)");
+    }
+
+    // ------------------------------------------------------------
+    // ordinary receive-side drops log at debug level, not error level
+
+    private static byte[] LogLevelFragment(ushort sequence, int fragmentId, int numFragments)
+    {
+        byte[] buffer = new byte[Wire.FragmentHeaderBytes + Wire.MaxPacketHeaderBytes + 500];
+        int p = 0;
+        buffer[p++] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(p), sequence);
+        p += 2;
+        buffer[p++] = (byte)fragmentId;
+        buffer[p++] = (byte)(numFragments - 1);
+        if (fragmentId == 0)
+        {
+            p += Wire.WritePacketHeader(buffer.AsSpan(p), sequence, 0, 0);
+        }
+        p += 500;
+        return buffer.AsSpan(0, p).ToArray();
+    }
+
+    private static List<string> CaptureLog(ReliableLogLevel level, Action scenario)
+    {
+        List<string> messages = new List<string>();
+        ReliableLogLevel savedLevel = ReliableLog.Level;
+        Action<string>? savedWriter = ReliableLog.Writer;
+        ReliableLog.Level = level;
+        ReliableLog.Writer = messages.Add;
+        try
+        {
+            scenario();
+        }
+        finally
+        {
+            ReliableLog.Level = savedLevel;
+            ReliableLog.Writer = savedWriter;
+        }
+        return messages;
+    }
+
+    private static void TestReceiveDropsLogAtDebug()
+    {
+        static Endpoint Sink(bool accept)
+        {
+            return new Endpoint(new EndpointConfig
+            {
+                Name = "sink",
+                MaxPacketSize = 8000,
+                FragmentAbove = 500,
+                FragmentSize = 500,
+                MaxFragments = 16,
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = (id, sequence, packetData) => accept,
+            }, 100.0);
+        }
+
+        (string Name, string Expected, Action Scenario)[] events =
+        {
+            ("oversized payload", "packet is at 8001 bytes", () =>
+            {
+                byte[] packet = new byte[Wire.MaxPacketHeaderBytes + 8001];
+                int headerBytes = Wire.WritePacketHeader(packet, 0, 0xFFFF, 0);
+                Sink(true).ReceivePacket(packet.AsSpan(0, headerBytes + 8001));
+            }),
+            ("rejected packet", "process packet failed", () =>
+            {
+                byte[] packet = new byte[Wire.MaxPacketHeaderBytes + 8];
+                int headerBytes = Wire.WritePacketHeader(packet, 0, 0xFFFF, 0);
+                Sink(false).ReceivePacket(packet.AsSpan(0, headerBytes + 8));
+            }),
+            ("stale fragment", "could not insert in reassembly buffer (stale)", () =>
+            {
+                Endpoint sink = Sink(true);
+                sink.ReceivePacket(LogLevelFragment(1000, 1, 4));
+                sink.ReceivePacket(LogLevelFragment(0, 1, 4));
+            }),
+            ("fragment count mismatch", "fragment count mismatch", () =>
+            {
+                Endpoint sink = Sink(true);
+                sink.ReceivePacket(LogLevelFragment(11, 1, 4));
+                sink.ReceivePacket(LogLevelFragment(11, 1, 3));
+            }),
+            ("duplicate fragment", "fragment already received", () =>
+            {
+                Endpoint sink = Sink(true);
+                byte[] fragment = LogLevelFragment(12, 1, 4);
+                sink.ReceivePacket(fragment);
+                sink.ReceivePacket(fragment);
+            }),
+        };
+
+        foreach ((string name, string expected, Action scenario) in events)
+        {
+            List<string> errorLog = CaptureLog(ReliableLogLevel.Error, scenario);
+            Check(errorLog.Count == 0, $"{name}: nothing logged at error level, got '{string.Join("", errorLog).TrimEnd()}'");
+
+            List<string> debugLog = CaptureLog(ReliableLogLevel.Debug, scenario);
+            Check(debugLog.Exists(m => m.Contains(expected, StringComparison.Ordinal)), $"{name}: logged at debug level");
+        }
     }
 }
