@@ -337,6 +337,23 @@ internal static partial class Tests
         {
             Check(packetData[i] == 0xAA, $"out-of-range fragment writes no byte {i}");
         }
+
+        byte[] firstPacketData = new byte[packetBufferSize];
+        Endpoint.FragmentReassemblyData firstReassembly = new Endpoint.FragmentReassemblyData
+        {
+            NumFragmentsTotal = numFragments,
+            PacketData = firstPacketData,
+        };
+        Span<byte> firstHeader = stackalloc byte[Wire.MaxPacketHeaderBytes];
+        int firstHeaderBytes = Wire.WritePacketHeader(firstHeader, 0, 0xFFFF, 0);
+        byte[] firstFragment = new byte[fragmentSize];
+        firstFragment[firstHeaderBytes] = 0x33;
+        firstFragment[fragmentSize - 1] = 0x44;
+        stored = Endpoint.StoreFragmentData(ref firstReassembly, 0, 0xFFFF, 0, 0, fragmentSize, firstFragment);
+        Check(stored, "in bounds first fragment is stored");
+        Check(firstReassembly.PacketHeaderBytes == firstHeaderBytes, "first fragment records the packet header size");
+        Check(firstPacketData[Wire.MaxPacketHeaderBytes] == 0x33, "first fragment payload start is written");
+        Check(firstPacketData[Wire.MaxPacketHeaderBytes + fragmentSize - firstHeaderBytes - 1] == 0x44, "first fragment payload end is written");
     }
 
     // ------------------------------------------------------------
