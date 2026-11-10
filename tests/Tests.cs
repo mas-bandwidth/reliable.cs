@@ -76,6 +76,7 @@ internal static partial class Tests
         RunTest("test_large_packets", TestLargePackets);
         RunTest("test_sequence_buffer_rollover", TestSequenceBufferRollover);
         RunTest("test_sequence_wrap", TestSequenceWrap);
+        RunTest("test_sequence_wrap_arithmetic", TestSequenceWrapArithmetic);
         RunTest("test_fragment_cleanup", TestFragmentCleanup);
         RunTest("test_unfinished_reassembly_respects_byte_budget", TestUnfinishedReassemblyRespectsByteBudget);
         RunTest("test_rtt", TestRtt);
@@ -83,6 +84,9 @@ internal static partial class Tests
         RunTest("test_jitter_estimator", TestJitterEstimator);
         RunTest("test_bandwidth_estimators", TestBandwidthEstimators);
         RunTest("test_endpoint_reset", TestEndpointReset);
+        RunTest("test_endpoint_create_invalid_config", TestEndpointCreateInvalidConfig);
+        RunTest("test_fragment_counts", TestFragmentCounts);
+        RunTest("test_truncated_packets", TestTruncatedPackets);
         RunTest("test_endpoint_reset_clears_stats", TestEndpointResetClearsStats);
         RunTest("test_rtt_min_large", TestRttMinLarge);
         RunTest("test_rtt_clamped_when_time_steps_back", TestRttClampedWhenTimeStepsBack);
@@ -499,6 +503,9 @@ internal static partial class Tests
 
     private const int TestAcksNumIterations = 256;
 
+    // the last 32 packets may not be acked yet when the loop ends
+    private const int TestAcksNumChecked = TestAcksNumIterations - 32;
+
     private static void TestAcks()
     {
         double time = 100.0;
@@ -532,7 +539,7 @@ internal static partial class Tests
                 senderAckedPacket[senderAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(senderAckedPacket[i], $"sender packet {i} must be acked");
         }
@@ -546,7 +553,7 @@ internal static partial class Tests
                 receiverAckedPacket[receiverAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(receiverAckedPacket[i], $"receiver packet {i} must be acked");
         }
@@ -590,7 +597,7 @@ internal static partial class Tests
                 senderAckedPacket[senderAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(senderAckedPacket[i] == (((i + 1) % 2) != 0), $"sender packet {i} ack state");
         }
@@ -604,7 +611,7 @@ internal static partial class Tests
                 receiverAckedPacket[receiverAcks[i]] = true;
             }
         }
-        for (int i = 0; i < TestAcksNumIterations / 2; ++i)
+        for (int i = 0; i < TestAcksNumChecked; ++i)
         {
             Check(receiverAckedPacket[i] == (((i + 1) % 2) != 0), $"receiver packet {i} ack state");
         }
@@ -821,15 +828,20 @@ internal static partial class Tests
         }
     }
 
+    private const int TestPacketsNumIterations = 16;
+
     private static void TestPackets()
     {
         double time = 100.0;
 
         TestContext context = new TestContext();
 
+        int[] numProcessed = new int[2];
+
         ProcessPacketCallback validateProcess = (id, sequence, packetData) =>
         {
             ValidatePacketData(packetData);
+            numProcessed[id]++;
             return true;
         };
 
@@ -848,7 +860,7 @@ internal static partial class Tests
 
         byte[] packetData = new byte[TestMaxPacketBytes];
 
-        for (int i = 0; i < 16; ++i)
+        for (int i = 0; i < TestPacketsNumIterations; ++i)
         {
             {
                 ushort sequence = context.Sender.NextPacketSequence;
@@ -857,9 +869,9 @@ internal static partial class Tests
             }
 
             {
-                ushort sequence = context.Sender.NextPacketSequence;
+                ushort sequence = context.Receiver.NextPacketSequence;
                 int packetBytes = GeneratePacketData(sequence, packetData);
-                context.Sender.SendPacket(packetData.AsSpan(0, packetBytes));
+                context.Receiver.SendPacket(packetData.AsSpan(0, packetBytes));
             }
 
             context.Sender.Update(time);
@@ -870,6 +882,9 @@ internal static partial class Tests
 
             time += deltaTime;
         }
+
+        Check(numProcessed[0] == TestPacketsNumIterations, $"sender processed {numProcessed[0]}, expected {TestPacketsNumIterations}");
+        Check(numProcessed[1] == TestPacketsNumIterations, $"receiver processed {numProcessed[1]}, expected {TestPacketsNumIterations}");
     }
 
     // ------------------------------------------------------------
@@ -1025,6 +1040,55 @@ internal static partial class Tests
         Check(sawAckBeforeWrap, "wrap: ack for sequence 65535");
         Check(sawAckAfterWrap, "wrap: ack for sequence 0");
         Check(context.Sender.GetCounter(EndpointCounter.NumPacketsAcked) > 0, "wrap: sender recorded acks");
+    }
+
+    // ------------------------------------------------------------
+    // test_sequence_wrap_arithmetic: 16 bit sequence arithmetic is modular at
+    // sequence 0 and across 65535 -> 0, whether or not the build checks overflow
+
+    private static void TestSequenceWrapArithmetic()
+    {
+        // sequence buffer at sequence 0, then walked across the wrap
+        SequenceBuffer<TestSequenceData> sequenceBuffer = new SequenceBuffer<TestSequenceData>(TestSequenceBufferSize);
+        Check(sequenceBuffer.TestInsert(0), "test insert at sequence 0");
+        sequenceBuffer.GenerateAckBits(out ushort ack, out uint ackBits);
+        Check(ack == 0xFFFF && ackBits == 0, "ack bits at sequence 0");
+        for (int i = 65500; i < 65536 + 40; ++i)
+        {
+            ushort sequence = unchecked((ushort)i);
+            Check(sequenceBuffer.Insert(sequence) >= 0, "insert across wrap");
+            sequenceBuffer.Advance(sequence);
+            sequenceBuffer.InsertWithCleanup(sequence, _ => { });
+            sequenceBuffer.AdvanceWithCleanup(sequence, _ => { });
+        }
+        sequenceBuffer.GenerateAckBits(out ack, out ackBits);
+        Check(ack == 39 && ackBits == 0xFFFFFFFF, "ack bits across wrap");
+
+        // packet header whose ack is behind the sequence across the wrap
+        Span<byte> packetData = stackalloc byte[Wire.MaxPacketHeaderBytes];
+        int bytesWritten = Wire.WritePacketHeader(packetData, 3, 65534, 0xFFFFFFFF);
+        int bytesRead = Wire.ReadPacketHeader("test_sequence_wrap_arithmetic", packetData.Slice(0, bytesWritten), out ushort readSequence, out ushort readAck, out uint readAckBits);
+        Check(bytesRead == bytesWritten && readSequence == 3 && readAck == 65534 && readAckBits == 0xFFFFFFFF, "packet header across wrap");
+
+        // endpoints sending from sequence 0 through 65535 -> 0
+        double time = 100.0;
+        TestContext context = new TestContext();
+        context.Sender = new Endpoint(DefaultConfig(context, 0, "sender"), time);
+        context.Receiver = new Endpoint(DefaultConfig(context, 1, "receiver"), time);
+        byte[] dummyPacket = new byte[8];
+        for (int i = 0; i < 65536 + 64; ++i)
+        {
+            context.Sender.SendPacket(dummyPacket);
+            context.Receiver.SendPacket(dummyPacket);
+            if ((i & 1023) == 0)
+            {
+                context.Sender.Update(time);
+                context.Receiver.Update(time);
+                time += 0.01;
+            }
+        }
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == 65536 + 64, "every packet received across wrap");
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsStale) == 0, "no stale packets across wrap");
     }
 
     // ------------------------------------------------------------
@@ -1384,6 +1448,273 @@ internal static partial class Tests
 
         Check(context.Sender.GetAcks().Length > 0, "acks accumulate after reset");
         Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) > 0, "packets received after reset");
+    }
+
+    // ------------------------------------------------------------
+    // test_endpoint_create_invalid_config
+
+    private static void TestEndpointCreateInvalidConfig()
+    {
+        static EndpointConfig Valid()
+        {
+            return new EndpointConfig
+            {
+                TransmitPacket = (id, sequence, packetData) => { },
+                ProcessPacket = s_acceptAll,
+            };
+        }
+
+        static void Refused(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            Check(false, $"{what} must be refused");
+        }
+
+        static void Accepted(Action<EndpointConfig> mutate, string what)
+        {
+            EndpointConfig config = Valid();
+            mutate(config);
+            try
+            {
+                _ = new Endpoint(config, 0.0);
+            }
+            catch (ArgumentException)
+            {
+                Check(false, $"{what} must be accepted");
+            }
+        }
+
+        Accepted(c => { }, "default config");
+
+        try
+        {
+            _ = new Endpoint(null!, 0.0);
+            Check(false, "null config must be refused");
+        }
+        catch (ArgumentNullException)
+        {
+        }
+
+        // the relationship between fragment count, fragment size and packet size
+
+        Refused(c => { c.MaxFragments = 4; c.FragmentSize = 1024; c.MaxPacketSize = 4 * 1024 + 1; }, "MaxFragments one short of MaxPacketSize");
+
+        // exactly covering is allowed
+
+        Accepted(c => { c.MaxFragments = 4; c.FragmentSize = 1024; c.MaxPacketSize = 4 * 1024; c.FragmentAbove = 1024; }, "MaxFragments exactly covering MaxPacketSize");
+
+        // ranges
+
+        Refused(c => c.MaxPacketSize = 0, "MaxPacketSize = 0");
+        Refused(c => c.FragmentAbove = 0, "FragmentAbove = 0");
+        Refused(c => c.FragmentSize = 0, "FragmentSize = 0");
+        Refused(c => c.MaxFragments = 0, "MaxFragments = 0");
+        Refused(c => c.MaxFragments = 257, "MaxFragments = 257");
+        Refused(c => c.AckBufferSize = 0, "AckBufferSize = 0");
+        Refused(c => c.SentPacketsBufferSize = -1, "SentPacketsBufferSize = -1");
+        Refused(c => c.ReceivedPacketsBufferSize = 0, "ReceivedPacketsBufferSize = 0");
+        Refused(c => c.FragmentReassemblyBufferSize = 0, "FragmentReassemblyBufferSize = 0");
+        Refused(c => c.RttHistorySize = 0, "RttHistorySize = 0");
+        Refused(c => c.TransmitPacket = null, "TransmitPacket = null");
+        Refused(c => c.ProcessPacket = null, "ProcessPacket = null");
+
+        // the smoothing factor boundaries 0 and 1 are accepted
+
+        Accepted(c => { c.RttSmoothingFactor = 0.0f; c.PacketLossSmoothingFactor = 0.0f; c.BandwidthSmoothingFactor = 0.0f; }, "smoothing factors 0");
+        Accepted(c => { c.RttSmoothingFactor = 1.0f; c.PacketLossSmoothingFactor = 1.0f; c.BandwidthSmoothingFactor = 1.0f; }, "smoothing factors 1");
+
+        // the largest sequence buffer sizes create an endpoint pair that still sends and receives
+
+        TestContext context = new TestContext();
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.SentPacketsBufferSize = 16384;
+        senderConfig.ReceivedPacketsBufferSize = 16384;
+        senderConfig.FragmentReassemblyBufferSize = 16384;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.SentPacketsBufferSize = 16384;
+        receiverConfig.ReceivedPacketsBufferSize = 16384;
+        receiverConfig.FragmentReassemblyBufferSize = 16384;
+
+        context.Sender = new Endpoint(senderConfig, 0.0);
+        context.Receiver = new Endpoint(receiverConfig, 0.0);
+
+        context.Sender.SendPacket(new byte[8]);
+
+        Check(context.Receiver.GetCounter(EndpointCounter.NumPacketsReceived) == 1, "largest buffer sizes still deliver");
+    }
+
+    // ------------------------------------------------------------
+    // test_fragment_counts
+
+    private static void TestFragmentCase(int fragmentSize, int maxFragments, int packetBytes, int expectedFragments)
+    {
+        TestContext context = new TestContext();
+
+        int numProcessed = 0;
+        byte[] processed = Array.Empty<byte>();
+
+        ProcessPacketCallback capture = (id, sequence, packetData) =>
+        {
+            numProcessed++;
+            processed = packetData.ToArray();
+            return true;
+        };
+
+        EndpointConfig senderConfig = DefaultConfig(context, 0, "sender");
+        senderConfig.FragmentSize = fragmentSize;
+        senderConfig.MaxFragments = maxFragments;
+        senderConfig.MaxPacketSize = fragmentSize * maxFragments;
+        senderConfig.FragmentAbove = fragmentSize;
+        senderConfig.ProcessPacket = capture;
+
+        EndpointConfig receiverConfig = DefaultConfig(context, 1, "receiver");
+        receiverConfig.FragmentSize = fragmentSize;
+        receiverConfig.MaxFragments = maxFragments;
+        receiverConfig.MaxPacketSize = fragmentSize * maxFragments;
+        receiverConfig.FragmentAbove = fragmentSize;
+        receiverConfig.ProcessPacket = capture;
+
+        context.Sender = new Endpoint(senderConfig, 100.0);
+        context.Receiver = new Endpoint(receiverConfig, 100.0);
+
+        byte[] packet = new byte[packetBytes];
+        for (int i = 0; i < packetBytes; ++i)
+        {
+            packet[i] = (byte)((i * 31) + 7);
+        }
+
+        context.Sender.SendPacket(packet);
+
+        string what = $"fragment case ({fragmentSize}, {maxFragments}, {packetBytes})";
+
+        Check(numProcessed == 1, $"{what}: processed {numProcessed}, expected 1");
+        Check(processed.Length == packetBytes, $"{what}: processed {processed.Length} bytes");
+        Check(processed.AsSpan().SequenceEqual(packet), $"{what}: processed bytes differ");
+
+        ulong fragmentsSent = context.Sender.GetCounter(EndpointCounter.NumFragmentsSent);
+        ulong fragmentsReceived = context.Receiver.GetCounter(EndpointCounter.NumFragmentsReceived);
+
+        Check(fragmentsSent == (ulong)expectedFragments, $"{what}: {fragmentsSent} fragments sent, expected {expectedFragments}");
+        Check(fragmentsReceived == (ulong)expectedFragments, $"{what}: {fragmentsReceived} fragments received, expected {expectedFragments}");
+    }
+
+    private static void TestFragmentCounts()
+    {
+        // an exact multiple of the fragment size, where the last fragment is full rather than a remainder
+        TestFragmentCase(512, 16, 512 * 4, 4);
+
+        // the largest packet the config allows, again an exact multiple
+        TestFragmentCase(512, 16, 512 * 16, 16);
+
+        // above the threshold by a single byte, and around the next boundary
+        TestFragmentCase(512, 16, 513, 2);
+        TestFragmentCase(512, 16, 1023, 2);
+        TestFragmentCase(512, 16, 1025, 3);
+        TestFragmentCase(64, 256, 65, 2);
+
+        // 256 fragments, the maximum the wire format can express
+        TestFragmentCase(64, 256, 64 * 256, 256);
+        TestFragmentCase(64, 256, 64 * 255 + 1, 256);
+
+        // at or below the threshold the packet is not fragmented
+        TestFragmentCase(512, 16, 512, 0);
+        TestFragmentCase(512, 16, 1, 0);
+    }
+
+    // ------------------------------------------------------------
+    // test_truncated_packets
+
+    private static void TestTruncatedPackets()
+    {
+        int numProcessed = 0;
+        System.Collections.Generic.List<byte[]> captured = new System.Collections.Generic.List<byte[]>();
+
+        EndpointConfig MakeConfig(string name)
+        {
+            return new EndpointConfig
+            {
+                Name = name,
+                FragmentSize = 256,
+                MaxFragments = 16,
+                MaxPacketSize = 256 * 16,
+                FragmentAbove = 256,
+                TransmitPacket = (id, sequence, packetData) => captured.Add(packetData.ToArray()),
+                ProcessPacket = (id, sequence, packetData) => { numProcessed++; return true; },
+            };
+        }
+
+        Endpoint sender = new Endpoint(MakeConfig("sender"), 100.0);
+        Endpoint receiver = new Endpoint(MakeConfig("receiver"), 100.0);
+
+        // an unfragmented packet, captured on the wire
+
+        byte[] packet = new byte[200];
+        packet.AsSpan().Fill(0xAB);
+        sender.SendPacket(packet);
+        Check(captured.Count == 1, "one packet captured");
+
+        // every truncation of it shorter than the header is rejected, and none is processed
+
+        for (int truncatedBytes = 1; truncatedBytes < 4; ++truncatedBytes)
+        {
+            receiver.ReceivePacket(captured[0].AsSpan(0, truncatedBytes));
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumPacketsInvalid) == 3, "truncated headers counted invalid");
+        Check(numProcessed == 0, "no truncated packet processed");
+
+        // the whole packet still arrives
+
+        receiver.ReceivePacket(captured[0]);
+        Check(numProcessed == 1, "whole packet processed");
+
+        // now a fragmented packet
+
+        captured.Clear();
+
+        byte[] largePacket = new byte[1024];
+        largePacket.AsSpan().Fill(0xCD);
+        sender.SendPacket(largePacket);
+        Check(captured.Count == 4, "four fragments captured");
+
+        // a fragment truncated inside its header is rejected
+
+        for (int truncatedBytes = 1; truncatedBytes < Wire.FragmentHeaderBytes; ++truncatedBytes)
+        {
+            receiver.ReceivePacket(captured[1].AsSpan(0, truncatedBytes));
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 0, "no truncated fragment received");
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == (ulong)(Wire.FragmentHeaderBytes - 1), "truncated fragment headers counted invalid");
+
+        // a fragment that is not the last one must carry exactly FragmentSize bytes,
+        // so a truncated body is rejected too
+
+        receiver.ReceivePacket(captured[1].AsSpan(0, captured[1].Length - 1));
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 0, "truncated fragment body not received");
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsInvalid) == (ulong)Wire.FragmentHeaderBytes, "truncated fragment body counted invalid");
+        Check(numProcessed == 1, "truncated fragment not processed");
+
+        // the intact fragments reassemble
+
+        for (int i = 0; i < captured.Count; ++i)
+        {
+            receiver.ReceivePacket(captured[i]);
+        }
+
+        Check(receiver.GetCounter(EndpointCounter.NumFragmentsReceived) == 4, "all four fragments received");
+        Check(numProcessed == 2, "fragmented packet processed");
     }
 
     // ------------------------------------------------------------
