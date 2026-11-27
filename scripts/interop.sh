@@ -5,9 +5,10 @@
 #   scripts/interop.sh [path-to-c-reliable-clone]
 #
 # Builds the C half of the compat harness against the real reliable.c, then runs
-# both halves across the wire-vector mode and the scripted scenario profiles
-# (clean, lossy, hostile — the hostile long run is the differential soak), and
-# diffs the outputs. Any byte of difference fails the gate.
+# both halves across the wire-vector mode, the receive-boundary, malformed-input,
+# config and hardening pins, and the scripted scenario profiles (clean, lossy,
+# hostile, wrap — the long runs are the differential soaks), and diffs the
+# outputs. Any byte of difference fails the gate.
 #
 # CI pins the C clone to a release tag (see .github/workflows/ci.yml) and runs
 # this with CC=clang; locally the default compiler is fine and the clone may
@@ -21,6 +22,21 @@ CC="${CC:-cc}"
 C_RELIABLE="${1:-../reliable}"
 FP_CONTRACT="${FP_CONTRACT:--ffp-contract=off}"
 [ -n "$FP_CONTRACT" ] || { echo "error: FP_CONTRACT must name a strict-float flag (default -ffp-contract=off)" >&2; exit 1; }
+
+# Hermetic when no C reference is reachable: the differential leg needs a real
+# checkout of mas-bandwidth/reliable, named by the argument (or the ../reliable
+# default). Without one, skip loudly and succeed so local/unit runs are not
+# blocked; under CI (CI set) a missing checkout fails the gate.
+if [ ! -f "$C_RELIABLE/reliable.c" ]; then
+    if [ -n "${CI:-}" ]; then
+        echo "error: no C reference checkout at $C_RELIABLE" >&2
+        exit 1
+    fi
+    echo "SKIP: no C reference checkout at $C_RELIABLE" >&2
+    echo "SKIP: pass one explicitly: scripts/interop.sh <path-to-reliable>" >&2
+    exit 0
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -31,10 +47,21 @@ trap 'rm -rf "$WORK"' EXIT
 # is the normative behavior (same rule as the serialize.cs interop gate).
 echo "== building C compat harness against $C_RELIABLE"
 echo "== C compiler: $CC ($(command -v "$CC")) $("$CC" --version | head -1) $FP_CONTRACT"
-"$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$C_RELIABLE/reliable.c" -lm
+# Since 1.4.2 the header codecs are static. The harness calls them, so this
+# build copy gives those two functions external linkage and changes nothing else.
+sed \
+    -e 's/^static int reliable_write_packet_header/int reliable_write_packet_header/' \
+    -e 's/^static int reliable_read_packet_header/int reliable_read_packet_header/' \
+    "$C_RELIABLE/reliable.c" > "$WORK/reliable.c"
+"$CC" -O2 "$FP_CONTRACT" -Wall -Wextra -I "$C_RELIABLE" -o "$WORK/compat-c" compat/c/compat.c "$WORK/reliable.c" -lm
 
 echo "== building C# compat harness"
-dotnet build -c Release compat/Compat.csproj --nologo -v q
+# -m:1 -nr:false: build in this process only. MSBuild worker nodes hang in
+# sandboxed environments where the runtime's shared-memory directory
+# (/tmp/.dotnet/shm) is not writable and is redirected out from under it, and
+# a hung node fails the gate after the node-connection timeout with no error;
+# a single-node build is slower but immune, and the gate is not build-bound.
+dotnet build -c Release compat/Compat.csproj --nologo -v q -m:1 -nr:false
 
 run_cs() {
     dotnet run -c Release --project compat/Compat.csproj --no-build -- "$@"
@@ -53,7 +80,11 @@ gate() {
     wc -l < "$WORK/c.out" | awk '{print "   identical ("$1" trace lines)"}'
 }
 
+gate "receive bounds on one receiver"  receive_bounds
 gate "wire vectors"                    vectors
+gate "malformed inputs"                malformed
+gate "config refusal"                  config_refusal
+gate "1.4.x hardening"                 hardening
 gate "scenario clean    (seed 1)"      scenario clean 1 300
 gate "scenario lossy    (seed 2)"      scenario lossy 2 500
 gate "scenario hostile  (seed 3)"      scenario hostile 3 500

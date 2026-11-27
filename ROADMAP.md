@@ -35,8 +35,8 @@ Packets larger than a fragment are split on send and reassembled on receive.
 | send and receive packets | ✅ |
 | large packets fragmented and reassembled | ✅ |
 | abandoned reassemblies cleaned up | ✅ |
-| unfinished reassembly has a byte budget | ❌ |
-| complete | 75% |
+| unfinished reassembly has a byte budget | ✅ |
+| complete | 100% |
 
 [Source data](docs/roadmap.sexp)
 
@@ -53,8 +53,8 @@ Round-trip time, jitter, packet loss and bandwidth estimates, and endpoint reset
 | rtt with min, max and average | ✅ |
 | jitter, packet loss and bandwidth, bit-identical to C | ✅ |
 | endpoint reset | ✅ |
-| reset hardening from the C 1.4 releases | ❌ |
-| complete | 75% |
+| reset hardening from the C 1.4 releases | ✅ |
+| complete | 100% |
 
 [Source data](docs/roadmap.sexp)
 
@@ -74,9 +74,9 @@ Hostile wire data never throws: malformed, stale, duplicate and truncated packet
 | seeded adversarial soak | ✅ |
 | zero allocation at steady state | ✅ |
 | invalid configuration refused at construction | ✅ |
-| configuration refuses exactly what C refuses | ❌ |
-| an empty received packet is counted, not thrown | ❌ |
-| complete | 75% |
+| configuration refuses exactly what C refuses | ✅ |
+| an empty received packet is counted, not thrown | ✅ |
+| complete | 100% |
 
 [Source data](docs/roadmap.sexp)
 
@@ -94,10 +94,11 @@ Byte-identical wire format and observable behaviour with the C reliable library,
 | head-to-head interop with reliable.c: bytes, deliveries, acks, counters, stats | ✅ |
 | strict float rounding pinned on x86-64 and arm64 | ✅ |
 | STANDARD.md vendored verbatim, drift checked | ✅ |
-| interop gate and spec follow the current C release | ❌ |
+| interop gate and spec follow the current C release | ✅ |
+| differential pins for the bounds ahead of the C release (later) | ❌ |
 | .NET 8 (LTS) and .NET 10 | ✅ |
 | Linux and macOS | ✅ |
-| complete | 85% |
+| complete | 87% |
 
 [Source data](docs/roadmap.sexp)
 

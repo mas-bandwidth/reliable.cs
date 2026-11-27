@@ -1,14 +1,21 @@
 # Post-release hardening — reliable.cs
 
-From the 2026-08-07 red/blue security review (parsing/reassembly, sequence/ack +
-resource-exhaustion, and fidelity lenses). Verdict was **READY** — zero surviving
-findings; config validation is stricter than the C's debug asserts. Post-release:
+The 2026-08-07 review recorded no surviving findings at that time. The port
+has since added construction-time checks for sequence-buffer sizes and
+smoothing factors; `Endpoint` accepts finite smoothing factors in [0,1].
 
-1. **`Reliable.cs:1210` int vs size_t.** `packetBufferSize` is computed as a C# int
-   where the C uses size_t. Not attacker-reachable (numFragments capped at 256,
-   FragmentSize is host config; overflow needs FragmentSize > ~8MB, which
-   construction-time validation and OOM already stop). A checked/long computation or
-   an explicit guard removes the last divergence from the reference.
+## Remaining large-size arithmetic review
 
-2. **Interop gate proven live in CI** — the `C wire + behavior compatibility` job runs
-   the C driver against the C# twin with byte-identical stdout required. Keep green.
+Fragment reassembly computes `packetBufferSize` as an `int` from the fragment
+count and configured fragment size. The constructor checks the product using
+`long`, but its bound allows the product up to `int.MaxValue` minus the maximum
+packet-header size. The allocation expression also adds eight bytes. Review
+that final addition with checked or wider arithmetic and a focused extreme
+configuration test before claiming every accepted configuration is safe from
+integer overflow. This is a configuration boundary, not a wire-input claim.
+
+## Ongoing gates
+
+The CI workflow runs the C wire and behavior compatibility gate against the
+v1.4.5 C reference, plus the C# test matrix. Consult the run for the commit
+being evaluated; an older green run does not establish the current head.

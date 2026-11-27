@@ -4,12 +4,10 @@
 ; :tested-revision is the main commit whose CI passed with that evidence.
 (:schema 1
  :root "goal"
- :page (:title "reliable.cs roadmap"
-        :roadmaps ("acks" "fragments" "stats" "robustness" "compat"))
+ :page (:roadmaps ("acks" "fragments" "stats" "robustness" "compat"))
  :nodes
  ((:id "goal" :type :work-set :children ("acks" "fragments" "stats" "robustness" "compat"))
   (:id "acks" :type :roadmap :title "Acknowledgement"
-   :text "Sequence numbers, packet headers and acks: which of your packets the other side received."
    :rows (("header" "packet header with sequence, ack and ack bits")
           ("sequence-buffer" "sequence buffers, including the 16-bit wrap")
           ("acks" "acks for every packet received")
@@ -36,7 +34,6 @@
   (:id "acks/ack-overflow" :type :task :title "ack buffer overflow handled" :state :done :evidence ("tests/Tests.cs: TestAckBufferOverflow") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "acks/reject-redelivery" :type :task :title "a packet the process callback rejects is not acked" :state :done :evidence ("tests/Hostile.cs: TestProcessRejectRedelivery") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "fragments" :type :roadmap :title "Fragmentation"
-   :text "Packets larger than a fragment are split on send and reassembled on receive."
    :rows (("packets" "send and receive packets")
           ("large" "large packets fragmented and reassembled")
           ("cleanup" "abandoned reassemblies cleaned up")
@@ -49,12 +46,10 @@
   (:id "fragments/packets" :type :task :title "send and receive packets" :state :done :evidence ("tests/Tests.cs: TestPackets") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "fragments/large" :type :task :title "large packets fragmented and reassembled" :state :done :evidence ("tests/Tests.cs: TestLargePackets" "tests/Tests.cs: TestGoldenFragments") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "fragments/cleanup" :type :task :title "abandoned reassemblies cleaned up" :state :done :evidence ("tests/Tests.cs: TestFragmentCleanup") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
-  (:id "fragments/reassembly-budget" :type :task :title "unfinished reassembly has a byte budget" :state :todo
-   :note "Endpoint.ReceivePacket rents each new reassembly buffer from ArrayPool with no budget and no age eviction; Update never touches reassembly (src/Reliable.cs:1210, :1215). Carry the C library budget."
+  (:id "fragments/reassembly-budget" :type :task :title "unfinished reassembly has a byte budget" :state :done :evidence ("tests/Tests.cs: TestUnfinishedReassemblyRespectsByteBudget" "commit a1c19af (land reliable-cs-port hardening onto the printed base)") :tested-revision "0198824"
    :sprint-card "cs-reliable-unfinished-reassembly-has-a-byte-budget"
    :sprint-needs "relfix-unfinished-reassembly-has-a-byte-budget")
   (:id "stats" :type :roadmap :title "Network stats"
-   :text "Round-trip time, jitter, packet loss and bandwidth estimates, and endpoint reset."
    :rows (("rtt" "rtt with min, max and average")
           ("jitter-loss-bandwidth" "jitter, packet loss and bandwidth, bit-identical to C")
           ("reset" "endpoint reset")
@@ -67,11 +62,9 @@
   (:id "stats/rtt" :type :task :title "rtt with min, max and average" :state :done :evidence ("tests/Tests.cs: TestRtt" ".github/workflows/ci.yml: c-interop job (scripts/interop.sh, bit-exact vs reliable.c v1.4.0 on ubuntu-latest and macos-latest), green on afcefe3") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "stats/jitter-loss-bandwidth" :type :task :title "jitter, packet loss and bandwidth, bit-identical to C" :state :done :evidence (".github/workflows/ci.yml: c-interop job (scripts/interop.sh, bit-exact vs reliable.c v1.4.0 on ubuntu-latest and macos-latest), green on afcefe3") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "stats/reset" :type :task :title "endpoint reset" :state :done :evidence ("tests/Tests.cs: TestEndpointReset") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
-  (:id "stats/reset-hardening" :type :task :title "reset hardening from the C 1.4 releases" :state :todo
-   :note "Reset should zero the same fields as the C 1.4 releases and fill the rtt history with -1; update README.md and notes/port-map.md."
+  (:id "stats/reset-hardening" :type :task :title "reset hardening from the C 1.4 releases" :state :done :evidence ("tests/Tests.cs: TestEndpointResetClearsStats" "commit a1c19af (land reliable-cs-port hardening onto the printed base)") :tested-revision "0198824"
    :sprint-card "cs-reliable-hardening-from-the-c-1-4-releases-is-carried")
   (:id "robustness" :type :roadmap :title "Robustness"
-   :text "Hostile wire data never throws: malformed, stale, duplicate and truncated packets are counted and dropped; no allocation at steady state."
    :rows (("truncated" "truncated headers refused and counted")
           ("hostile-fragments" "hostile fragments refused and counted")
           ("fuzz" "parser fuzz and the C fuzz_target.c script harness")
@@ -95,21 +88,19 @@
   (:id "robustness/soak" :type :task :title "seeded adversarial soak" :state :done :evidence ("tests/Soak.cs: TestSoak") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "robustness/zero-alloc" :type :task :title "zero allocation at steady state" :state :done :evidence ("tests/Hostile.cs: TestZeroAllocation") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "robustness/config-validation" :type :task :title "invalid configuration refused at construction" :state :done :evidence ("tests/Hostile.cs: TestConfigValidation") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
-  (:id "robustness/config-like-c" :type :task :title "configuration refuses exactly what C refuses" :state :todo
-   :note "Require power-of-two sizes up to 16384 for the three buffer sizes, add the five missing C bounds in C order with long arithmetic, and check everything before allocating."
+  (:id "robustness/config-like-c" :type :task :title "configuration refuses exactly what C refuses" :state :done :evidence ("tests/Hostile.cs: TestConfigRefusesBadSequenceBufferSizes" "tests/Hostile.cs: TestConfigRefusesTheCBounds" "commit a1c19af (land reliable-cs-port hardening onto the printed base)") :tested-revision "0198824"
    :sprint-card "cs-reliable-config-refuses-what-c-refuses")
-  (:id "robustness/empty-packet" :type :task :title "an empty received packet is counted, not thrown" :state :todo
-   :note "ReceivePacket(empty) still throws ArgumentException (src/Reliable.cs:1044; asserted in tests/Hostile.cs TestConfigValidation). Count it in NumPacketsInvalid and return."
+  (:id "robustness/empty-packet" :type :task :title "an empty received packet is counted, not thrown" :state :done :evidence ("tests/Hostile.cs: TestReceiveEmptyPacketIsCountedInvalid" "commit a1c19af (land reliable-cs-port hardening onto the printed base)") :tested-revision "0198824"
    :sprint-card "cs-reliable-an-empty-packet-is-counted-not-thrown"
    :pushed-head "3b0be5fb6eb3951b49f33d1412e67fa3567f7951"
    :pushed-branch "sprint/cs-reliable-an-empty-packet-is-counted-not-thrown.w5.g1.e20")
   (:id "compat" :type :roadmap :title "Compatibility"
-   :text "Byte-identical wire format and observable behaviour with the C reliable library, on the platforms CI runs."
    :rows (("golden" "golden wire vectors from the C library")
           ("interop" "head-to-head interop with reliable.c: bytes, deliveries, acks, counters, stats")
           ("strict-float" "strict float rounding pinned on x86-64 and arm64")
           ("standard" "STANDARD.md vendored verbatim, drift checked")
           ("follow-c" "interop gate and spec follow the current C release")
+          ("ahead-of-c" "differential pins for the bounds ahead of the C release" :later t)
           ("dotnet" ".NET 8 (LTS) and .NET 10")
           ("platforms" "Linux and macOS"))
    :columns (("done" "done"))
@@ -118,14 +109,17 @@
            ("strict-float" "done" "compat/strict-float")
            ("standard" "done" "compat/standard")
            ("follow-c" "done" "compat/follow-c")
+           ("ahead-of-c" "done" "compat/ahead-of-c")
            ("dotnet" "done" "compat/dotnet")
            ("platforms" "done" "compat/platforms")))
   (:id "compat/golden" :type :task :title "golden wire vectors from the C library" :state :done :evidence ("tests/Tests.cs: TestGoldenPacketHeaders" "tests/Tests.cs: TestGoldenFragments") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "compat/interop" :type :task :title "head-to-head interop with reliable.c: bytes, deliveries, acks, counters, stats" :state :done :evidence (".github/workflows/ci.yml: c-interop job (scripts/interop.sh, bit-exact vs reliable.c v1.4.0 on ubuntu-latest and macos-latest), green on afcefe3") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "compat/strict-float" :type :task :title "strict float rounding pinned on x86-64 and arm64" :state :done :evidence ("tests/Tests.cs: FloatMultiplyAddRoundsTwice" "commit 038ee97 (c-interop: run on arm64 where contraction bites; pin C# strict rounding)") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "compat/standard" :type :task :title "STANDARD.md vendored verbatim, drift checked" :state :done :evidence (".github/workflows/ci.yml: spec-sync job (STANDARD.md matches upstream)" "commit 913317a (STANDARD.md: re-vendor verbatim from reliable main)") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
-  (:id "compat/follow-c" :type :task :title "interop gate and spec follow the current C release" :state :todo
-   :note "The interop gate and golden pins are at reliable v1.4.0; the latest C release is v1.4.5. Move the pinned tag and STANDARD.md to the named C release, byte for byte."
+  (:id "compat/follow-c" :type :task :title "interop gate and spec follow the current C release" :state :done :evidence (".github/workflows/ci.yml: c-interop job pinned at reliable v1.4.5, the latest C release" "STANDARD.md equals reliable v1.4.5 STANDARD.md byte for byte" "commit b473baa (interop: pin the C release v1.4.5 and gate only shared behaviour)") :tested-revision "0198824"
    :sprint-card "cs-reliable-interop-gate-and-spec-follow-c")
+  (:id "compat/ahead-of-c" :type :task :title "differential pins for the bounds ahead of the C release" :state :todo
+   :note "The 16384 cap on sequence-buffer sizes, rounding those sizes up to a power of two, and counting an empty receive invalid follow C main but are ahead of the pinned C release v1.4.5, so the interop gate feeds only inputs both implementations agree on and the unit tests pin the rest. FragmentReassemblyByteBudget is off by default, as C has no budget, and the gate runs at that default. When a C release carries these rules, bump the pin in .github/workflows/ci.yml and README.md, feed the zero-length receive in malformed and receive_bounds, and widen the config_refusal value list to sizes that are not powers of two and to 16385. Waits on a C release of mas-bandwidth/reliable that carries these rules (main roadmap item interop-pins-the-bounds-ahead-of-c, 2026-11-10)."
+   :date "2026-11-10")
   (:id "compat/dotnet" :type :task :title ".NET 8 (LTS) and .NET 10" :state :done :evidence (".github/workflows/ci.yml: test job, Tests (net10.0) and Tests (net8.0, the LTS leg), green on afcefe3") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")
   (:id "compat/platforms" :type :task :title "Linux and macOS" :state :done :evidence (".github/workflows/ci.yml: test job, matrix ubuntu-latest, macos-latest, green on afcefe3") :tested-revision "afcefe3d61528bab4c0cc1332f8637eae30cd851")))
